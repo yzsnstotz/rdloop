@@ -32,17 +32,36 @@ LOCK_ACQUIRED=0
 CURRENT_ATTEMPT=0
 NORMAL_EXIT=0
 
+# P0: state_version tracking
+STATE_VERSION=1
+EFFECTIVE_MAX_ATTEMPTS=3
+PREV_STATE=""
+PREV_PAUSE_REASON=""
+PREV_LAST_DECISION=""
+PREV_ATTEMPT=0
+PREV_EFFECTIVE_MAX=""
+
+# P0: consecutive timeout tracking
+CONSECUTIVE_TIMEOUT_COUNT=0
+CONSECUTIVE_TIMEOUT_KEY=""
+
 get_pause_category() {
   local code="$1"
   case "$code" in
     PAUSED_CURSOR_MISSING|PAUSED_CODEX_MISSING|PAUSED_CRASH|PAUSED_NOT_GIT_REPO|PAUSED_TASK_ID_CONFLICT)
       echo "PAUSED_INFRA" ;;
-    PAUSED_JUDGE_INVALID|PAUSED_JUDGE_TIMEOUT)
+    PAUSED_CODER_AUTH_195|PAUSED_JUDGE_AUTH_195)
+      echo "PAUSED_INFRA" ;;
+    PAUSED_JUDGE_INVALID|PAUSED_JUDGE_TIMEOUT|PAUSED_JUDGE_VERDICT_INVALID|PAUSED_JUDGE_VERDICT_INCONSISTENT)
       echo "PAUSED_JUDGE" ;;
+    PAUSED_CODER_TIMEOUT|PAUSED_TEST_TIMEOUT)
+      echo "PAUSED_TIMEOUT" ;;
     PAUSED_ALLOWED_PATHS|PAUSED_FORBIDDEN_GLOBS)
       echo "PAUSED_POLICY" ;;
-    PAUSED_USER)
+    PAUSED_USER|PAUSED_WAITING_USER_INPUT)
       echo "PAUSED_MANUAL" ;;
+    PAUSED_SCORE_GATED|PAUSED_SCORE_BELOW_THRESHOLD)
+      echo "PAUSED_SCORE" ;;
     *) echo "" ;;
   esac
 }
@@ -82,64 +101,102 @@ except: print(0)
 }
 
 ##############################################################################
-# 2. JSON writers
+# 2. JSON writers (atomic via atomic_write.py)
 ##############################################################################
+ATOMIC_WRITE="${LIB_DIR}/atomic_write.py"
+
+maybe_bump_state_version() {
+  local state="$1" prcode="$2" last_dec="$3" cur_att="$4" eff_max="$5"
+  if [ "$state" != "$PREV_STATE" ] || [ "$prcode" != "$PREV_PAUSE_REASON" ] || \
+     [ "$last_dec" != "$PREV_LAST_DECISION" ] || [ "$cur_att" != "$PREV_ATTEMPT" ] || \
+     [ "$eff_max" != "$PREV_EFFECTIVE_MAX" ]; then
+    STATE_VERSION=$(( STATE_VERSION + 1 ))
+  fi
+  PREV_STATE="$state"; PREV_PAUSE_REASON="$prcode"
+  PREV_LAST_DECISION="$last_dec"; PREV_ATTEMPT="$cur_att"
+  PREV_EFFECTIVE_MAX="$eff_max"
+}
+
 write_status() {
   local state="$1" cur_att="$2" max_att="$3" pflag="$4" last_dec="$5"
   local msg="$6" q_json="$7" pcat="$8" prcode="$9"
-  python3 -c "
+  shift 9
+  local last_trans_json="${1:-null}"
+  maybe_bump_state_version "$state" "$prcode" "$last_dec" "$cur_att" "$EFFECTIVE_MAX_ATTEMPTS"
+  local rubric_ver="null"
+  [ -f "${TASK_JSON:-}" ] && rubric_ver=$(json_read "$TASK_JSON" "rubric_version" "null")
+  [ "$rubric_ver" = "null" ] || rubric_ver="\"${rubric_ver}\""
+  python3 "$ATOMIC_WRITE" "${TASK_DIR}/status.json" "$(python3 -c "
 import json,sys
+lt_raw=sys.argv[13]
+lt=json.loads(lt_raw) if lt_raw!='null' else None
 d={'task_id':sys.argv[1],'state':sys.argv[2],'current_attempt':int(sys.argv[3]),
    'max_attempts':int(sys.argv[4]),'pause_flag':sys.argv[5]=='true',
    'last_decision':sys.argv[6],'message':sys.argv[7],
    'questions_for_user':json.loads(sys.argv[8]),
    'pause_category':sys.argv[9],'pause_reason_code':sys.argv[10],
-   'updated_at':sys.argv[11]}
-with open(sys.argv[12],'w') as f: json.dump(d,f,indent=2)
+   'updated_at':sys.argv[11],
+   'state_version':int(sys.argv[12]),
+   'effective_max_attempts':int(sys.argv[14]),
+   'paths':{'status_json':'status.json'},
+   'rubric_version_used':json.loads(sys.argv[15]),
+   'last_user_input_ts_consumed':None}
+if lt is not None: d['last_transition']=lt
+print(json.dumps(d))
 " "$TASK_ID" "$state" "$cur_att" "$max_att" "$pflag" \
   "$last_dec" "$msg" "$q_json" "$pcat" "$prcode" \
-  "$(now_iso)" "${TASK_DIR}/status.json"
+  "$(now_iso)" "$STATE_VERSION" "$last_trans_json" "$EFFECTIVE_MAX_ATTEMPTS" \
+  "$rubric_ver")"
+  # Write _index entry (A1-6)
+  write_index_entry "$state"
 }
 
 write_final_summary() {
   local decision="$1" last_dec="$2" cur_att="$3" max_att="$4"
   local msg="$5" q_json="$6" pcat="$7" prcode="$8" head_c="$9"
-  python3 -c "
+  shift 9
+  local score="${1:-null}" verdict_summary="${2:-}"
+  python3 "$ATOMIC_WRITE" "${TASK_DIR}/final_summary.json" "$(python3 -c "
 import json,sys
+score_raw=sys.argv[11]
+score=int(score_raw) if score_raw!='null' and score_raw!='' else None
 d={'task_id':sys.argv[1],'decision':sys.argv[2],'last_decision':sys.argv[3],
    'current_attempt':int(sys.argv[4]),'max_attempts':int(sys.argv[5]),
    'message':sys.argv[6],'questions_for_user':json.loads(sys.argv[7]),
    'pause_category':sys.argv[8],'pause_reason_code':sys.argv[9],
-   'final_head_commit':sys.argv[10],'updated_at':sys.argv[11]}
-with open(sys.argv[12],'w') as f: json.dump(d,f,indent=2)
+   'final_head_commit':sys.argv[10],'updated_at':sys.argv[12],
+   'state_version':int(sys.argv[13]),
+   'final_score_0_100':score,
+   'verdict_summary':sys.argv[14],
+   'paths':{'status_json':'status.json','final_summary_json':'final_summary.json'}}
+print(json.dumps(d))
 " "$TASK_ID" "$decision" "$last_dec" "$cur_att" "$max_att" \
   "$msg" "$q_json" "$pcat" "$prcode" "$head_c" \
-  "$(now_iso)" "${TASK_DIR}/final_summary.json"
+  "$score" "$(now_iso)" "$STATE_VERSION" "$verdict_summary")"
 }
 
 write_event() {
   local att="$1" etype="$2" summary="$3"
   local att_dir="${4:-}" wt_dir="${5:-}"
-  python3 -c "
+  python3 "$ATOMIC_WRITE" --append "${TASK_DIR}/events.jsonl" "$(python3 -c "
 import json,sys
 e={'ts':sys.argv[1],'task_id':sys.argv[2],'attempt':int(sys.argv[3]) if sys.argv[3] else 0,
    'type':sys.argv[4],'summary':sys.argv[5],
    'paths':{'out_dir':sys.argv[6],'attempt_dir':sys.argv[7],
             'worktree_dir':sys.argv[8],'status_path':sys.argv[9]}}
-with open(sys.argv[10],'a') as f: f.write(json.dumps(e)+'\n')
+print(json.dumps(e))
 " "$(now_iso)" "$TASK_ID" "$att" "$etype" "$summary" \
-  "${TASK_DIR}" "$att_dir" "$wt_dir" "${TASK_DIR}/status.json" \
-  "${TASK_DIR}/events.jsonl"
+  "${TASK_DIR}" "$att_dir" "$wt_dir" "${TASK_DIR}/status.json")"
 }
 
 write_commands_log() {
   local att="$1" cmd="$2" rc="$3" secs="$4" logf="$5"
-  python3 -c "
+  python3 "$ATOMIC_WRITE" --append "$logf" "$(python3 -c "
 import json,sys
 e={'ts':sys.argv[1],'attempt':int(sys.argv[2]),'cmd':sys.argv[3],
    'rc':int(sys.argv[4]),'seconds':float(sys.argv[5])}
-with open(sys.argv[6],'a') as f: f.write(json.dumps(e)+'\n')
-" "$(now_iso)" "$att" "$cmd" "$rc" "$secs" "$logf"
+print(json.dumps(e))
+" "$(now_iso)" "$att" "$cmd" "$rc" "$secs")"
 }
 
 write_metrics() {
@@ -148,7 +205,7 @@ write_metrics() {
   local a_start="$8" c_start="${9:-}" c_fin="${10:-}"
   local t_start="${11:-}" t_fin="${12:-}" j_start="${13:-}" j_fin="${14:-}"
   local notes="${15:-[]}"
-  python3 -c "
+  python3 "$ATOMIC_WRITE" "${att_dir}/metrics.json" "$(python3 -c "
 import json,sys
 d={'schema_version':'v1','task_id':sys.argv[1],'attempt':int(sys.argv[2]),
    'elapsed_seconds':float(sys.argv[3]),'judge_retries':int(sys.argv[4]),
@@ -158,16 +215,16 @@ d={'schema_version':'v1','task_id':sys.argv[1],'attempt':int(sys.argv[2]),
      'judge_finished_at':sys.argv[11]},
    'coder_rc':int(sys.argv[12]),'test_rc':int(sys.argv[13]),
    'judge_rc':int(sys.argv[14]),'notes':json.loads(sys.argv[15])}
-with open(sys.argv[16],'w') as f: json.dump(d,f,indent=2)
+print(json.dumps(d))
 " "$TASK_ID" "$att_num" "$elapsed" "$jretries" \
   "$a_start" "$c_start" "$c_fin" "$t_start" "$t_fin" "$j_start" "$j_fin" \
-  "$crc" "$trc" "$jrc" "$notes" "${att_dir}/metrics.json"
+  "$crc" "$trc" "$jrc" "$notes")"
 }
 
 write_evidence() {
   local att_dir="$1" att_num="$2" wt_path="$3" head_c="$4"
   local tcmd="$5" trc="$6" tlog_tail="$7" cmds_json="$8"
-  python3 -c "
+  python3 "$ATOMIC_WRITE" "${att_dir}/evidence.json" "$(python3 -c "
 import json,sys
 d={'schema_version':'v1','task_id':sys.argv[1],'attempt':int(sys.argv[2]),
    'worktree_path':sys.argv[3],'created_at':sys.argv[4],
@@ -176,9 +233,9 @@ d={'schema_version':'v1','task_id':sys.argv[1],'attempt':int(sys.argv[2]),
    'commands':json.loads(sys.argv[6]),
    'test':{'cmd':sys.argv[7],'rc':int(sys.argv[8]),'log_tail':sys.argv[9]},
    'artifacts':[],'metrics_path':'metrics.json'}
-with open(sys.argv[10],'w') as f: json.dump(d,f,indent=2)
+print(json.dumps(d))
 " "$TASK_ID" "$att_num" "$wt_path" "$(now_iso)" "$head_c" \
-  "$cmds_json" "$tcmd" "$trc" "$tlog_tail" "${att_dir}/evidence.json"
+  "$cmds_json" "$tcmd" "$trc" "$tlog_tail")"
 }
 
 write_env_json() {
@@ -192,17 +249,30 @@ write_env_json() {
   command -v cursor >/dev/null 2>&1 && { cur_avail="true"; cur_path=$(command -v cursor); }
   command -v codex >/dev/null 2>&1 && { codex_avail="true"; codex_path=$(command -v codex); }
   command -v claude >/dev/null 2>&1 && { claude_avail="true"; claude_path=$(command -v claude); }
-  python3 -c "
+  python3 "$ATOMIC_WRITE" "${att_dir}/env.json" "$(python3 -c "
 import json,sys
 d={'os':sys.argv[1],'node_version':sys.argv[2],'python_version':sys.argv[3],
    'git_version':sys.argv[4],
    'cursor_available':sys.argv[5]=='true','cursor_path':sys.argv[6],
    'codex_available':sys.argv[7]=='true','codex_path':sys.argv[8],
    'claude_available':sys.argv[9]=='true','claude_path':sys.argv[10]}
-with open(sys.argv[11],'w') as f: json.dump(d,f,indent=2)
+print(json.dumps(d))
 " "$os_info" "$node_ver" "$py_ver" "$git_ver" \
   "$cur_avail" "$cur_path" "$codex_avail" "$codex_path" \
-  "$claude_avail" "$claude_path" "${att_dir}/env.json"
+  "$claude_avail" "$claude_path")"
+}
+
+write_index_entry() {
+  local state="$1"
+  local idx_dir="${OUT_DIR}/_index/tasks"
+  mkdir -p "$idx_dir"
+  python3 "$ATOMIC_WRITE" "${idx_dir}/${TASK_ID}.json" "$(python3 -c "
+import json,sys
+d={'task_id':sys.argv[1],'state':sys.argv[2],'updated_at':sys.argv[3],
+   'state_version':int(sys.argv[4]),
+   'paths':{'status_json':'${sys.argv[1]}/status.json'}}
+print(json.dumps(d))
+" "$TASK_ID" "$state" "$(now_iso)" "$STATE_VERSION")"
 }
 
 ##############################################################################
@@ -254,6 +324,7 @@ release_lock() {
 # 4. Trap / cleanup — §5.13, §19 check 4
 ##############################################################################
 cleanup() {
+  local exit_code=$?
   set +e
   if [ "$NORMAL_EXIT" = "1" ]; then
     release_lock; return
@@ -266,23 +337,28 @@ cleanup() {
       local ma=3
       [ -f "${TASK_JSON:-}" ] && ma=$(json_read "$TASK_JSON" "max_attempts" "3")
       [ ! -f "${TASK_DIR}/status.json" ] && {
-        # ensure status exists before writing
         write_status "RUNNING" "$CURRENT_ATTEMPT" "$ma" "false" "" "" '[]' "" ""
       }
+      local crash_lt
+      crash_lt=$(python3 -c "
+import json,sys
+d={'reason_code':'PAUSED_CRASH','previous_state':'RUNNING','message':'coordinator crashed (rc=${exit_code})','signal_or_rc':int(sys.argv[1])}
+print(json.dumps(d))
+" "$exit_code" 2>/dev/null || echo '{"reason_code":"PAUSED_CRASH","previous_state":"RUNNING"}')
       write_status "PAUSED" "$CURRENT_ATTEMPT" "$ma" "false" \
-        "NEED_USER_INPUT" "coordinator crashed or was killed" \
+        "NEED_USER_INPUT" "coordinator crashed or was killed (rc=${exit_code})" \
         '["Please check logs and re-run with --continue"]' \
-        "PAUSED_INFRA" "PAUSED_CRASH"
+        "PAUSED_INFRA" "PAUSED_CRASH" "$crash_lt"
       write_final_summary "PAUSED" "NEED_USER_INPUT" "$CURRENT_ATTEMPT" "$ma" \
-        "coordinator crashed or was killed" \
+        "coordinator crashed or was killed (rc=${exit_code})" \
         '["Please check logs and re-run with --continue"]' \
         "PAUSED_INFRA" "PAUSED_CRASH" ""
-      write_event "$CURRENT_ATTEMPT" "STATE_CHANGED" "PAUSED_CRASH" 2>/dev/null || true
+      write_event "$CURRENT_ATTEMPT" "COORDINATOR_CRASHED" "PAUSED_CRASH rc=${exit_code}" 2>/dev/null || true
     fi
   fi
   release_lock
 }
-trap cleanup EXIT ERR INT TERM
+trap cleanup EXIT INT TERM ERR
 
 ##############################################################################
 # 5. Checkpoint: control.json PAUSE check — §5.11
@@ -295,10 +371,11 @@ check_control_pause() {
   if [ "$action" = "PAUSE" ]; then
     local ma; ma=$(json_read "$TASK_JSON" "max_attempts" "3")
     log_info "Checkpoint ${cpname}: PAUSE requested"
+    local lt_user='{"reason_code":"PAUSED_USER","previous_state":"RUNNING","message":"user PAUSE at '"${cpname}"'"}'
     write_status "PAUSED" "$CURRENT_ATTEMPT" "$ma" "true" \
       "" "paused at checkpoint: ${cpname}" \
       '["User requested PAUSE. Use --continue to resume."]' \
-      "PAUSED_MANUAL" "PAUSED_USER"
+      "PAUSED_MANUAL" "PAUSED_USER" "$lt_user"
     write_final_summary "PAUSED" "NEED_USER_INPUT" "$CURRENT_ATTEMPT" "$ma" \
       "paused at checkpoint: ${cpname}" \
       '["User requested PAUSE. Use --continue to resume."]' \
@@ -355,11 +432,18 @@ process_control() {
 ##############################################################################
 enter_paused() {
   local rcode="$1" msg="$2" qjson="$3"
-  local ldec="${4:-NEED_USER_INPUT}" hc="${5:-}"
+  local ldec="${4:-NEED_USER_INPUT}" hc="${5:-}" consume="${6:-false}"
   local ma; ma=$(json_read "$TASK_JSON" "max_attempts" "3")
   local cat; cat=$(get_pause_category "$rcode")
+  local lt_json
+  lt_json=$(python3 -c "
+import json,sys
+d={'reason_code':sys.argv[1],'previous_state':'RUNNING','message':sys.argv[2]}
+if sys.argv[3]!='0': d['consecutive_count']=int(sys.argv[3]); d['reason_key']=sys.argv[4]
+print(json.dumps(d))
+" "$rcode" "$msg" "$CONSECUTIVE_TIMEOUT_COUNT" "$CONSECUTIVE_TIMEOUT_KEY")
   write_status "PAUSED" "$CURRENT_ATTEMPT" "$ma" "false" \
-    "$ldec" "$msg" "$qjson" "$cat" "$rcode"
+    "$ldec" "$msg" "$qjson" "$cat" "$rcode" "$lt_json"
   write_final_summary "PAUSED" "$ldec" "$CURRENT_ATTEMPT" "$ma" \
     "$msg" "$qjson" "$cat" "$rcode" "$hc"
   write_event "$CURRENT_ATTEMPT" "STATE_CHANGED" "$rcode"
@@ -790,8 +874,9 @@ cmd_reset() {
     rm -rf "$wtb"
   fi
   local ma=3; [ -f "$TASK_JSON" ] && ma=$(json_read "$TASK_JSON" "max_attempts" "3")
+  local lt_reset='{"reason_code":"PAUSED_USER","previous_state":"RUNNING","message":"task reset"}'
   write_status "PAUSED" "0" "$ma" "false" "NEED_USER_INPUT" "reset performed" \
-    '["Task has been reset. Use --continue or create new task."]' "PAUSED_MANUAL" "PAUSED_USER"
+    '["Task has been reset. Use --continue or create new task."]' "PAUSED_MANUAL" "PAUSED_USER" "$lt_reset"
   write_final_summary "PAUSED" "NEED_USER_INPUT" "0" "$ma" "reset performed" \
     '["Task has been reset. Use --continue or create new task."]' "PAUSED_MANUAL" "PAUSED_USER" ""
   write_event "0" "TASK_RESET" "task reset performed"

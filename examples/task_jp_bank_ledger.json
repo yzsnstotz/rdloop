@@ -1,0 +1,22 @@
+{
+  "schema_version": "v1",
+  "task_id": "jp_bank_ledger_req",
+  "repo_path": "repo",
+  "base_ref": "main",
+  "goal": "对以下业务需求做「需求整理、拓展与优化」，产出结构化需求文档或规格说明（不实现具体系统）：以我日本公司银行作为唯一收费口，对外可以接多个平台服务收款，多个软件收款，并生成财务账本系统。其中对于公司的信息都先不要提问以免打断任务闭环。",
+  "acceptance": "产出一份完整的需求整理文档或规格说明，涵盖：唯一收费口（日本公司银行）、多平台/多软件收款对接、财务账本系统；约束中明确「公司信息暂不提问」；文档存于任务产出目录。",
+  "test_cmd": "true",
+  "max_attempts": 3,
+  "coder": "cursor-agent",
+  "judge": "codex-cli",
+  "constraints": ["本任务为需求整理与拓展，不编写业务系统代码；不向用户询问公司名称、地址等公司信息，以免打断任务闭环"],
+  "created_at": "",
+  "target_type": "external_repo",
+  "allowed_paths": [],
+  "forbidden_globs": ["**/.env", "**/secrets*", "**/*.pem"],
+  "cursor_cmd": "cursor",
+  "codex_cmd": "codex",
+  "coder_timeout_seconds": 600,
+  "judge_timeout_seconds": 300,
+  "test_timeout_seconds": 300
+}
