@@ -1,0 +1,8 @@
+{
+  "_comment": "JudgeVerdict v1 - judge output schema (example/reference)",
+  "schema_version": "v1",
+  "decision": "PASS",
+  "reasons": ["All tests pass", "Code changes are correct"],
+  "next_instructions": "",
+  "questions_for_user": []
+}

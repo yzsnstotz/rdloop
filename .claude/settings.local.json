@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ssh:*)",
+      "Bash(chmod:*)",
+      "Bash(export GIT_DISCOVERY_ACROSS_FILESYSTEM=1)",
+      "Bash(git -C /Volumes/yzliu/work/projects/rdloop/examples/dummy_repo status)",
+      "Bash(git -C /Volumes/yzliu/work/projects/rdloop/examples/dummy_repo commit -m \"Initial commit\")",
+      "Bash(git -C /Volumes/yzliu/work/projects/rdloop/examples/dummy_repo log --oneline)",
+      "Bash(bash:*)"
+    ]
+  }
+}

@@ -1,0 +1,9 @@
+out/
+worktrees/
+*.log
+node_modules/
+.DS_Store
+# Exclude backup / draft requirement docs from repo
+需求bak/
+# Keep dummy_repo contents but not its .git (avoid embedded repo)
+examples/dummy_repo/.git/

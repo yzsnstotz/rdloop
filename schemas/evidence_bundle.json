@@ -1,0 +1,23 @@
+{
+  "_comment": "EvidenceBundle v1 - per-attempt evidence schema (example/reference)",
+  "schema_version": "v1",
+  "task_id": "example_task_001",
+  "attempt": 1,
+  "worktree_path": "/path/to/worktree",
+  "created_at": "2025-01-01T00:00:00Z",
+  "git": {
+    "diff_stat_path": "git/diff.stat",
+    "diff_patch_path": "git/diff.patch",
+    "head_commit": "abc1234"
+  },
+  "commands": [
+    { "cmd": "test_cmd", "rc": 0, "seconds": 1.5 }
+  ],
+  "test": {
+    "cmd": "bash run_tests.sh",
+    "rc": 0,
+    "log_tail": "All tests passed"
+  },
+  "artifacts": [],
+  "metrics_path": "metrics.json"
+}

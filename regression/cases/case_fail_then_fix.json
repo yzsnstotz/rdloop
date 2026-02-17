@@ -1,0 +1,27 @@
+{
+  "schema_version": "v1",
+  "task_id": "WILL_BE_REPLACED",
+  "repo_path": "WILL_BE_REPLACED",
+  "base_ref": "main",
+  "goal": "Test auto-advance: first attempt fails, second passes",
+  "acceptance": "test_cmd returns 0 on last attempt",
+  "test_cmd": "test -f .fix_marker",
+  "max_attempts": 3,
+  "coder": "mock",
+  "judge": "mock",
+  "constraints": [],
+  "created_at": "",
+  "target_type": "external_repo",
+  "allowed_paths": [],
+  "forbidden_globs": ["**/.env", "**/secrets*", "**/*.pem"],
+  "cursor_cmd": "cursor",
+  "codex_cmd": "codex",
+  "coder_timeout_seconds": 600,
+  "judge_timeout_seconds": 300,
+  "test_timeout_seconds": 300,
+  "_expect": {
+    "final_decision": "FAILED",
+    "last_decision": "FAIL",
+    "min_attempts": 3
+  }
+}
