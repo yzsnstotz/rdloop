@@ -49,3 +49,16 @@ textarea { width: 100%; min-height: 120px; background: #0d1117; border: 1px soli
 
 .empty-state { text-align: center; padding: 60px 20px; color: #8b949e; }
 .empty-state h2 { color: #8b949e; }
+
+.hidden { display: none !important; }
+
+.live-log-panel { background: #161b22; border: 1px solid #30363d; border-radius: 8px; margin-bottom: 20px; overflow: hidden; }
+.live-log-tabs { display: flex; gap: 0; border-bottom: 1px solid #30363d; }
+.live-log-tab { padding: 10px 16px; background: #21262d; border: none; color: #8b949e; cursor: pointer; font-size: 13px; }
+.live-log-tab:hover { color: #c9d1d9; background: #30363d; }
+.live-log-tab.active { background: #0d1117; color: #58a6ff; border-bottom: 2px solid #58a6ff; margin-bottom: -1px; }
+.live-log-body { padding: 12px; min-height: 200px; max-height: 400px; overflow: auto; }
+.live-log-pre { margin: 0; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 12px; font-size: 12px; font-family: 'SF Mono', Monaco, monospace; white-space: pre-wrap; word-break: break-all; min-height: 180px; max-height: 360px; overflow: auto; }
+.live-log-meta { padding: 8px 12px; font-size: 11px; color: #8b949e; border-top: 1px solid #30363d; }
+.live-log-meta code { font-size: 11px; color: #8b949e; }
+.live-log-coord-hint { color: #8b949e; font-style: italic; }

@@ -85,6 +85,16 @@ cd gui && npm install && npm start
 
 Features: task list, attempt details, timeline, Pause/Resume/RunNext controls, instruction editing.
 
+## Real Coder + Judge CLIs
+
+To use **real** Cursor (coder) and Codex (judge) instead of mocks:
+
+1. In your task JSON set `"coder": "cursor"` and `"judge": "codex"`.
+2. Install Coder CLI and ensure the `coder` command is in PATH (default; override with `cursor_cmd` in task JSON if you use another name).
+3. Install or implement a Judge CLI named `judger` that reads prompt+evidence from stdin and prints a [JudgeVerdict](schemas/judge_verdict.json) JSON to stdout (default; override with `codex_cmd` in task JSON if needed).
+
+Full steps, CLI contracts, and an example task spec: **[docs/REAL_CLI_SETUP.md](docs/REAL_CLI_SETUP.md)**.
+
 ## Maintenance Commands
 
 ```bash

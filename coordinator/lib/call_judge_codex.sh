@@ -13,16 +13,16 @@ judge_prompt_path="$4"
 
 mkdir -p "${out_attempt_dir}/judge"
 
-# Read codex_cmd from task spec
+# Read codex_cmd from task spec (default: judge)
 codex_cmd=$(python3 -c "
 import json, sys
 try:
     with open('${task_json_path}') as f:
         d = json.load(f)
-    print(d.get('codex_cmd', 'codex'))
+    print(d.get('codex_cmd', 'judge'))
 except:
-    print('codex')
-" 2>/dev/null || echo "codex")
+    print('judge')
+" 2>/dev/null || echo "judge")
 
 # Check codex availability
 if ! command -v "$codex_cmd" >/dev/null 2>&1; then
@@ -50,9 +50,9 @@ judge_stdin="${judge_stdin}
 ---
 $(cat "$evidence_json_path")"
 
-# Call codex
+# Call codex (unset TERM to avoid interactive TUI when no TTY)
 tmp_verdict="${out_attempt_dir}/judge/verdict.tmp.json"
-echo "$judge_stdin" | "$codex_cmd" > "$tmp_verdict" 2>"${out_attempt_dir}/judge/codex_stderr.log"
+( unset TERM; echo "$judge_stdin" | "$codex_cmd" > "$tmp_verdict" 2>"${out_attempt_dir}/judge/codex_stderr.log" )
 codex_rc=$?
 
 if [ $codex_rc -ne 0 ]; then

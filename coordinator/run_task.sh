@@ -539,7 +539,7 @@ run_attempt() {
 
   # Check cursor CLI for cursor_cli
   if [ "$coder_type" = "cursor_cli" ]; then
-    local ccmd; ccmd=$(json_read "$TASK_JSON" "cursor_cmd" "cursor")
+    local ccmd; ccmd=$(json_read "$TASK_JSON" "cursor_cmd" "coder")
     if ! command -v "$ccmd" >/dev/null 2>&1; then
       echo "127" > "${att_dir}/coder/rc.txt"
       echo "[CODER] cursor CLI not found" > "${att_dir}/coder/run.log"
@@ -648,7 +648,7 @@ print(json.dumps(cs))
 
   # Check codex CLI
   if [ "$judge_type" = "codex_cli" ]; then
-    local cxcmd; cxcmd=$(json_read "$TASK_JSON" "codex_cmd" "codex")
+    local cxcmd; cxcmd=$(json_read "$TASK_JSON" "codex_cmd" "judge")
     if ! command -v "$cxcmd" >/dev/null 2>&1; then
       write_event "$att_num" "JUDGE_FINISHED" "rc=127 codex missing" "$att_dir" "$wt"
       enter_paused "PAUSED_CODEX_MISSING" "codex CLI not found (${cxcmd})" \
@@ -844,7 +844,7 @@ d={'schema_version':'v1','task_id':sys.argv[1],'repo_path':sys.argv[2],
    'coder':'cursor_cli','judge':'codex_cli','constraints':[],
    'created_at':'','target_type':'rdloop_self',
    'allowed_paths':[],'forbidden_globs':['**/.env','**/secrets*','**/*.pem'],
-   'cursor_cmd':'cursor','codex_cmd':'codex',
+   'cursor_cmd':'coder','codex_cmd':'judge',
    'coder_timeout_seconds':600,'judge_timeout_seconds':300,'test_timeout_seconds':300}
 with open(sys.argv[4],'w') as f: json.dump(d,f,indent=2)
 " "$tid" "$RDLOOP_ROOT" "$ic" "$sf"
@@ -963,6 +963,23 @@ cmd_continue() {
     done
   else
     log_info "No more attempts (${mx}/${ma})"
+    # Restore status from final_summary so UI does not stay RUNNING
+    if [ -f "${TASK_DIR}/final_summary.json" ]; then
+      local fs_dec fs_msg fs_prc fs_pcat qj
+      fs_dec=$(json_read "${TASK_DIR}/final_summary.json" "decision" "PAUSED")
+      fs_msg=$(json_read "${TASK_DIR}/final_summary.json" "message" "no more attempts")
+      fs_prc=$(json_read "${TASK_DIR}/final_summary.json" "pause_reason_code" "")
+      fs_pcat=$(json_read "${TASK_DIR}/final_summary.json" "pause_category" "")
+      qj=$(json_read "${TASK_DIR}/final_summary.json" "questions_for_user" "[]")
+      [ -z "$qj" ] || [ "$qj" = "[]" ] && [ -f "${TASK_DIR}/status.json" ] && qj=$(json_read "${TASK_DIR}/status.json" "questions_for_user" "[]")
+      if [ "$fs_dec" = "READY_FOR_REVIEW" ] || [ "$fs_dec" = "FAILED" ]; then
+        write_status "$fs_dec" "$mx" "$ma" "false" "$fs_dec" "$fs_msg" "$qj" "$fs_pcat" "$fs_prc"
+      else
+        write_status "PAUSED" "$mx" "$ma" "false" "NEED_USER_INPUT" "$fs_msg" "$qj" "$fs_pcat" "$fs_prc"
+      fi
+    else
+      write_status "PAUSED" "$mx" "$ma" "false" "NEED_USER_INPUT" "no more attempts" '["No more attempts. Reset or create new task."]' "" ""
+    fi
   fi
   release_lock; NORMAL_EXIT=1
 }

@@ -1,0 +1,22 @@
+{
+  "schema_version": "v1",
+  "task_id": "optimize_openclaw_telegram_req",
+  "repo_path": "..",
+  "base_ref": "main",
+  "goal": "Optimize docs/REQUIREMENTS_OPENCLAW_TELEGRAM.md: improve structure, clarity, and completeness; preserve all functional requirements and the no-LLM constraint; add implementation notes or cross-references where useful.",
+  "acceptance": "Document exists at docs/REQUIREMENTS_OPENCLAW_TELEGRAM.md; sections are clear and consistent; FR1/FR2/FR3 and constraints unchanged in meaning; optional: brief implementation hints or references for OpenClaw integration.",
+  "test_cmd": "test -f docs/REQUIREMENTS_OPENCLAW_TELEGRAM.md && head -5 docs/REQUIREMENTS_OPENCLAW_TELEGRAM.md | grep -q OpenClaw",
+  "max_attempts": 2,
+  "coder": "cursor",
+  "judge": "cursor",
+  "constraints": [],
+  "created_at": "",
+  "target_type": "external_repo",
+  "allowed_paths": ["docs/"],
+  "forbidden_globs": ["**/.env", "**/secrets*", "**/*.pem"],
+  "cursor_cmd": "/Users/yzliu/.local/bin/cursor-agent",
+  "codex_cmd": "/opt/homebrew/bin/codex",
+  "coder_timeout_seconds": 600,
+  "judge_timeout_seconds": 600,
+  "test_timeout_seconds": 300
+}

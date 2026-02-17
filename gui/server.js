@@ -41,6 +41,28 @@ function readEvents(filepath) {
   } catch { return []; }
 }
 
+// Helper: read file from byte offset (for live log streaming). Returns { content, nextOffset }.
+function readFileFromOffset(filepath, offset) {
+  let fd;
+  try {
+    if (!fs.existsSync(filepath)) return { content: '', nextOffset: 0 };
+    const stat = fs.statSync(filepath);
+    const size = stat.size;
+    const nextOffset = size;
+    if (offset < 0) offset = 0;
+    if (offset >= size) return { content: '', nextOffset };
+    fd = fs.openSync(filepath, 'r');
+    const len = size - offset;
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, offset);
+    return { content: buf.toString('utf8'), nextOffset };
+  } catch (e) {
+    return { content: '', nextOffset: offset || 0 };
+  } finally {
+    if (fd !== undefined) try { fs.closeSync(fd); } catch {}
+  }
+}
+
 // GET /api/tasks — list all tasks
 app.get('/api/tasks', (req, res) => {
   try {
@@ -88,10 +110,12 @@ app.get('/api/task/:taskId', (req, res) => {
     for (const dir of entries) {
       const attDir = path.join(taskDir, dir);
       const testRc = readFile(path.join(attDir, 'test', 'rc.txt'));
+      const coderRc = readFile(path.join(attDir, 'coder', 'rc.txt'));
       const diffStat = readFile(path.join(attDir, 'git', 'diff.stat'));
       const verdict = readJSON(path.join(attDir, 'judge', 'verdict.json'));
       attempts.push({
         name: dir,
+        coder_rc: coderRc ? coderRc.trim() : null,
         test_rc: testRc ? testRc.trim() : null,
         diff_stat: diffStat,
         judge_decision: verdict?.decision || null
@@ -119,6 +143,15 @@ app.get('/api/task/:taskId/attempt/:n', (req, res) => {
     return res.status(404).json({ error: 'Attempt not found' });
   }
 
+  const judgeDir = path.join(attDir, 'judge');
+  let judge_run_log = '';
+  const cursorStderr = readFile(path.join(judgeDir, 'cursor_stderr.log'), 2000);
+  const codexStderr = readFile(path.join(judgeDir, 'codex_stderr.log'), 2000);
+  if (cursorStderr && cursorStderr.trim()) judge_run_log += cursorStderr.trim() + '\n';
+  if (codexStderr && codexStderr.trim()) judge_run_log += (judge_run_log ? '\n' : '') + codexStderr.trim() + '\n';
+  const verdictTmp = readFile(path.join(judgeDir, 'verdict.tmp.json'), 8000);
+  if (verdictTmp && verdictTmp.trim()) judge_run_log += (judge_run_log ? '\n--- LLM stdout ---\n' : '') + verdictTmp.trim();
+
   res.json({
     evidence: readJSON(path.join(attDir, 'evidence.json')),
     verdict: readJSON(path.join(attDir, 'judge', 'verdict.json')),
@@ -127,6 +160,10 @@ app.get('/api/task/:taskId/attempt/:n', (req, res) => {
     test_log: readFile(path.join(attDir, 'test', 'stdout.log'), 400),
     diff_stat: readFile(path.join(attDir, 'git', 'diff.stat')),
     instruction: readFile(path.join(attDir, 'coder', 'instruction.txt')),
+    coder_rc: readFile(path.join(attDir, 'coder', 'rc.txt'))?.trim() || null,
+    coder_run_log: readFile(path.join(attDir, 'coder', 'run.log'), 2000),
+    judge_rc: readFile(path.join(judgeDir, 'rc.txt'))?.trim() || null,
+    judge_run_log: judge_run_log || null,
     env: readJSON(path.join(attDir, 'env.json'))
   });
 });
@@ -150,6 +187,40 @@ app.post('/api/task/:taskId/control', (req, res) => {
 
   fs.writeFileSync(path.join(taskDir, 'control.json'), JSON.stringify(control, null, 2));
   res.json({ ok: true, nonce: control.nonce });
+});
+
+// GET /api/task/:taskId/logs/coordinator?offset=N — tail coordinator run.log from byte offset
+app.get('/api/task/:taskId/logs/coordinator', (req, res) => {
+  const taskId = req.params.taskId;
+  const offset = parseInt(req.query.offset, 10) || 0;
+  const logFile = path.join(OUT_DIR, taskId, 'gui', 'run.log');
+  const result = readFileFromOffset(logFile, offset);
+  res.json(result);
+});
+
+// GET /api/task/:taskId/logs/attempt/:n/coder?offset=N — tail coder run.log for attempt n
+app.get('/api/task/:taskId/logs/attempt/:n/coder', (req, res) => {
+  const taskId = req.params.taskId;
+  const n = req.params.n;
+  const pad = String(n).padStart(3, '0');
+  const offset = parseInt(req.query.offset, 10) || 0;
+  const logFile = path.join(OUT_DIR, taskId, `attempt_${pad}`, 'coder', 'run.log');
+  const result = readFileFromOffset(logFile, offset);
+  res.json(result);
+});
+
+// GET /api/task/:taskId/logs/attempt/:n/judge?offset=N — tail judge log (cursor_stderr.log or codex_stderr.log)
+app.get('/api/task/:taskId/logs/attempt/:n/judge', (req, res) => {
+  const taskId = req.params.taskId;
+  const n = req.params.n;
+  const pad = String(n).padStart(3, '0');
+  const offset = parseInt(req.query.offset, 10) || 0;
+  const judgeDir = path.join(OUT_DIR, taskId, `attempt_${pad}`, 'judge');
+  const cursorLog = path.join(judgeDir, 'cursor_stderr.log');
+  const codexLog = path.join(judgeDir, 'codex_stderr.log');
+  const logFile = fs.existsSync(cursorLog) ? cursorLog : codexLog;
+  const result = readFileFromOffset(logFile, offset);
+  res.json(result);
 });
 
 // POST /api/task/:taskId/run — trigger coordinator
