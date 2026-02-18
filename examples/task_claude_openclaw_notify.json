@@ -1,6 +1,6 @@
 {
   "schema_version": "v1",
-  "task_id": "claude_openclaw_notify",
+  "task_id": "task_claude_openclaw_notify",
   "repo_path": "repo",
   "base_ref": "main",
   "goal": "做一个小工具，实现 Claude CLI 与 OpenClaw/Telegram 的联动：（1）当 Claude CLI 在工作时需要用户确认权限时，通过 OpenClaw 通知我的 Telegram，并支持我通过 Telegram 进行审批选择（通过/拒绝等），结果返回到 Claude CLI 以继续任务；（2）当 Claude CLI 因「到达用量 limit」而停止工作时，通过 OpenClaw 通知我的 Telegram，告知下一次可开启的时间，并支持我通过 Telegram 通知 Claude CLI 继续未完成的工作。",
@@ -16,10 +16,25 @@
   "created_at": "",
   "target_type": "external_repo",
   "allowed_paths": [],
-  "forbidden_globs": ["**/.env", "**/secrets*", "**/*.pem"],
-  "cursor_cmd": "cursor",
+  "forbidden_globs": [
+    "**/.env",
+    "**/secrets*",
+    "**/*.pem"
+  ],
+  "cursor_cmd": "cursor-agent",
   "codex_cmd": "codex",
   "coder_timeout_seconds": 600,
   "judge_timeout_seconds": 300,
-  "test_timeout_seconds": 300
+  "test_timeout_seconds": 300,
+  "task_type": "requirements_doc",
+  "rubric_thresholds": {
+    "clarity": 3,
+    "completeness": 3,
+    "acceptance_testability": 3,
+    "risk_and_exception": 3,
+    "constraints_and_compliance": 3,
+    "feasibility": 3,
+    "structure_and_readability": 3,
+    "min_score": 50
+  }
 }

@@ -49,25 +49,67 @@ async function api(path, opts) {
   return res.json();
 }
 
-// Load task list (sidebar) — running tasks from out/
+// Hidden task IDs (frontend-only, so sidebar does not grow indefinitely)
+function getHiddenTasks() {
+  try {
+    const raw = localStorage.getItem('rdloop_hiddenTasks');
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+}
+function setHiddenTasks(ids) {
+  localStorage.setItem('rdloop_hiddenTasks', JSON.stringify(ids));
+}
+function hideTask(taskId, e) {
+  if (e) e.stopPropagation();
+  const ids = getHiddenTasks();
+  if (!ids.includes(taskId)) ids.push(taskId);
+  setHiddenTasks(ids);
+  loadTasks();
+}
+function clearHiddenTasks(e) {
+  if (e) e.stopPropagation();
+  setHiddenTasks([]);
+  loadTasks();
+}
+
+// Load task list (sidebar) — running tasks from out/; filter hidden
 async function loadTasks() {
   const data = await api('/tasks');
   const list = document.getElementById('task-list');
-  const items = data.items || data.tasks || [];
+  const allItems = data.items || data.tasks || [];
+  const hidden = getHiddenTasks();
+  const items = allItems.filter(t => !hidden.includes(t.task_id));
+  const hiddenCount = allItems.length - items.length;
+
   if (items.length === 0) {
-    list.innerHTML = '<div style="padding:16px;color:#8b949e">No tasks found.<br>Run examples/run_hello.sh first.</div>';
+    let msg = 'No tasks found.<br>Run examples/run_hello.sh first.';
+    if (allItems.length > 0) {
+      msg = `All ${allItems.length} task(s) hidden.`;
+    }
+    list.innerHTML = `
+      <div style="padding:16px;color:#8b949e">${msg}</div>
+      ${hiddenCount > 0 ? `<div style="padding:0 16px 12px"><button type="button" class="btn" style="font-size:11px;padding:4px 8px" onclick="clearHiddenTasks()">Show all</button></div>` : ''}
+    `;
     return;
   }
-  list.innerHTML = items.map(t => `
+  list.innerHTML = `
+    ${hiddenCount > 0 ? `<div style="padding:8px 12px 4px;font-size:11px;color:#8b949e">${hiddenCount} hidden · <button type="button" class="btn" style="font-size:11px;padding:0 6px;vertical-align:middle" onclick="clearHiddenTasks()">Show all</button></div>` : ''}
+    ${items.map(t => `
     <div class="task-item ${t.task_id === currentTaskId ? 'active' : ''}"
          onclick="selectTask('${escapeHtml(t.task_id)}')">
-      <div class="task-id">${escapeHtml(t.task_id)}</div>
-      <div class="task-meta">
-        ${badge(t.state)}
-        attempt ${escapeHtml(String(t.current_attempt || 0))} · ${escapeHtml(t.last_decision || '-')}
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:4px">
+        <div style="min-width:0;flex:1">
+          <div class="task-id">${escapeHtml(t.task_id)}</div>
+          <div class="task-meta">
+            ${badge(t.state)}
+            attempt ${escapeHtml(String(t.current_attempt || 0))} · ${escapeHtml(t.last_decision || '-')}
+          </div>
+        </div>
+        <button type="button" class="btn" style="flex-shrink:0;padding:2px 6px;font-size:12px;line-height:1;opacity:0.7" onclick="hideTask('${escapeHtml(t.task_id)}', event)" title="Hide from list">×</button>
       </div>
     </div>
-  `).join('');
+  `).join('')}
+  `;
 }
 
 // B1-2/B1-3/B1-4: Fetch log for a specific tab

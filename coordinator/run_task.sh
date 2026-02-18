@@ -252,7 +252,9 @@ write_env_json() {
   node_ver=$(node -v 2>/dev/null || echo "N/A")
   py_ver=$(python3 -V 2>/dev/null || echo "N/A")
   local cur_avail="false" cur_path="" codex_avail="false" codex_path="" claude_avail="false" claude_path=""
-  command -v cursor >/dev/null 2>&1 && { cur_avail="true"; cur_path=$(command -v cursor); }
+  # Cursor execution via queue only (README ## Cursor execution)
+  local qcli="${LIB_DIR}/../adapters/cursor_queue_cli.sh"
+  [ -x "$qcli" ] && { cur_avail="true"; cur_path="$qcli"; }
   command -v codex >/dev/null 2>&1 && { codex_avail="true"; codex_path=$(command -v codex); }
   command -v claude >/dev/null 2>&1 && { claude_avail="true"; claude_path=$(command -v claude); }
   python3 -c '
@@ -728,6 +730,9 @@ run_attempt() {
   fi
   [ -z "$coder_type" ] && coder_type="mock"
   [ -z "$judge_type" ] && judge_type="mock"
+  # Map display names to script suffix (call_coder_${suffix}.sh / call_judge_${suffix}.sh)
+  case "$coder_type" in cursor-agent|cursor_cli) coder_script_suffix="cursor";; codex-cli|codex_cli) coder_script_suffix="codex";; *) coder_script_suffix="$coder_type";; esac
+  case "$judge_type" in cursor-agent|cursor_cli) judge_script_suffix="cursor";; codex-cli|codex_cli) judge_script_suffix="codex";; *) judge_script_suffix="$judge_type";; esac
   coder_timeout=$(json_read "$TASK_JSON" "coder_timeout_seconds" "600")
   test_timeout=$(json_read "$TASK_JSON" "test_timeout_seconds" "300")
   judge_timeout=$(json_read "$TASK_JSON" "judge_timeout_seconds" "300")
@@ -751,21 +756,21 @@ run_attempt() {
   c_start=$(now_iso)
   write_event "$att_num" "CODER_STARTED" "coder=${coder_type}" "$att_dir" "$wt"
 
-  # Check cursor CLI for cursor_cli
-  if [ "$coder_type" = "cursor_cli" ]; then
-    local ccmd; ccmd=$(json_read "$TASK_JSON" "cursor_cmd" "cursor")
-    if ! command -v "$ccmd" >/dev/null 2>&1; then
+  # Cursor execution must go through queue (README ## Cursor execution); do not call cursor-agent directly
+  if [ "$coder_type" = "cursor_cli" ] || [ "$coder_type" = "cursor-agent" ]; then
+    local queue_cli="${LIB_DIR}/../adapters/cursor_queue_cli.sh"
+    if [ ! -f "$queue_cli" ] || [ ! -x "$queue_cli" ]; then
       echo "127" > "${att_dir}/coder/rc.txt"
-      echo "[CODER] cursor CLI not found" > "${att_dir}/coder/run.log"
-      write_event "$att_num" "CODER_FINISHED" "rc=127 cursor missing" "$att_dir" "$wt"
-      enter_paused "PAUSED_CURSOR_MISSING" "cursor CLI not found (${ccmd})" \
-        "[\"cursor CLI missing, please fix PATH/install\"]"
+      echo "[CODER] cursor queue CLI required (README ## Cursor execution)" > "${att_dir}/coder/run.log"
+      write_event "$att_num" "CODER_FINISHED" "rc=127 queue CLI missing" "$att_dir" "$wt"
+      enter_paused "PAUSED_CURSOR_MISSING" "cursor_queue_cli.sh not found or not executable (do not call cursor-agent directly)" \
+        "[\"Use coordinator/adapters/cursor_queue_cli.sh; see README ## Cursor execution\"]"
       NORMAL_EXIT=1; exit 0
     fi
   fi
 
   local ifile; ifile=$(build_instruction "$att_dir" "$att_num" "$wt" "$base_ref" "$goal" "$acceptance")
-  local coder_script="${LIB_DIR}/call_coder_${coder_type}.sh"
+  local coder_script="${LIB_DIR}/call_coder_${coder_script_suffix}.sh"
   if [ ! -f "$coder_script" ]; then
     log_error "Coder script not found: ${coder_script}"
     coder_rc=1
@@ -885,8 +890,8 @@ print(json.dumps(cs))
   j_start=$(now_iso)
   write_event "$att_num" "JUDGE_STARTED" "judge=${judge_type}" "$att_dir" "$wt"
 
-  # Check codex CLI
-  if [ "$judge_type" = "codex_cli" ]; then
+  # Check codex CLI for codex-cli / codex_cli
+  if [ "$judge_type" = "codex_cli" ] || [ "$judge_type" = "codex-cli" ]; then
     local cxcmd; cxcmd=$(json_read "$TASK_JSON" "codex_cmd" "codex")
     if ! command -v "$cxcmd" >/dev/null 2>&1; then
       write_event "$att_num" "JUDGE_FINISHED" "rc=127 codex missing" "$att_dir" "$wt"
@@ -896,7 +901,7 @@ print(json.dumps(cs))
     fi
   fi
 
-  local judge_script="${LIB_DIR}/call_judge_${judge_type}.sh"
+  local judge_script="${LIB_DIR}/call_judge_${judge_script_suffix}.sh"
   if [ ! -f "$judge_script" ]; then
     log_error "Judge script not found: ${judge_script}"
     enter_paused "PAUSED_JUDGE_INVALID" "judge script not found: ${judge_script}" \
@@ -951,6 +956,12 @@ print(json.dumps(cs))
     # Classify via decision_table
     local err_cls="VERDICT_INVALID"
     [ "$judge_rc" = "124" ] && err_cls="TIMEOUT"
+    # Log verdict validation details when invalid for debugging
+    if [ "$err_cls" = "VERDICT_INVALID" ] && [ -f "${att_dir}/judge/verdict.json" ]; then
+      local val_err; val_err=$(python3 "${LIB_DIR}/validate_verdict.py" "${att_dir}/judge/verdict.json" 2>&1) || true
+      [ -n "$val_err" ] && echo "$val_err" | while read -r line; do log_info "[validate_verdict] $line"; done
+    fi
+    log_info "Check judge output: ${att_dir}/judge/verdict.json and ${att_dir}/judge/extract_err.log (or codex_stderr.log / cursor_stderr.log)"
     update_consecutive_timeout "judge" "$judge_rc"
     local dj; dj=$(call_decision_table "judge" "$judge_rc" "$err_cls")
     act_on_decision "$dj" "" "$att_num" "$max_att"
@@ -972,6 +983,9 @@ print(json.dumps(cs))
   if [ "$validate_rc" = "1" ]; then
     error_class="VERDICT_INVALID"
     log_info "Verdict structurally invalid (validate_verdict exit 1)"
+    local val_err; val_err=$(python3 "${LIB_DIR}/validate_verdict.py" "${att_dir}/judge/verdict.json" 2>&1) || true
+    [ -n "$val_err" ] && echo "$val_err" | while read -r line; do log_info "[validate_verdict] $line"; done
+    log_info "Check judge output: ${att_dir}/judge/verdict.json and ${att_dir}/judge/extract_err.log (or codex_stderr.log / cursor_stderr.log)"
   elif [ "$validate_rc" = "2" ]; then
     error_class="VERDICT_INCONSISTENT"
     log_info "Verdict K5-3 inconsistent (validate_verdict exit 2)"

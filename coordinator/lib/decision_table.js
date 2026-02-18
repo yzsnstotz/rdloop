@@ -96,6 +96,7 @@ function decideNextState(ctx) {
             last_decision: "NEED_USER_INPUT",
             questions_for_user: [
                 "Judge returned invalid verdict JSON. Check judge output.",
+                "In the attempt folder, check judge/verdict.json, judge/extract_err.log, and judge/codex_stderr.log or judge/cursor_stderr.log. Coordinator log has validation errors and paths.",
             ],
             message: "judge verdict invalid",
         };

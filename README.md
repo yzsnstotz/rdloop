@@ -85,6 +85,32 @@ cd gui && npm install && npm start
 
 Features: task list, attempt details, timeline, Pause/Resume/RunNext controls, instruction editing.
 
+## Cursor execution (Claude / OpenClaw / ao users)
+
+### 1) Single execution entry for Claude (copy-paste instruction)
+
+**From now on, do not call `cursor-agent` directly** (SSH triggers macOS Keychain Security 195/36). All Cursor execution must go through the queue CLI:
+
+```bash
+cd /Users/yzliu/work/projects/rdloop && ./coordinator/adapters/cursor_queue_cli.sh --id <ATTEMPT_ID> --timeout 600 "<PROMPT>"
+```
+
+- **stdout** = response; **process exit code** = rc.
+- Worker is already running and consumes `out/cursor_queue`, producing `out/cursor_out`.
+- Omit `--id` if you don’t need it.
+
+### 2) How OpenClaw / ao users should call rdloop
+
+- **ao users must not run `cursor-agent`.** They may only run rdloop CLI or `cursor_queue_cli.sh`, e.g.:
+
+```bash
+ssh local-yzliu 'cd /Users/yzliu/work/projects/rdloop && ./coordinator/adapters/cursor_queue_cli.sh "..."'
+```
+
+### 3) Timeout (optional hardening)
+
+The client-side `cursor_queue_cli.sh` already enforces a 600s timeout, so the worker can run without its own timeout. If you want to harden against hung processes later, you can either: `brew install coreutils` and use `gtimeout` in the worker, or add a small pure bash/Node timeout wrapper in rdloop.
+
 ## Maintenance Commands
 
 ```bash

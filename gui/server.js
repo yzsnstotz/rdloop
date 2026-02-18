@@ -14,6 +14,23 @@ const EXAMPLES_DIR = path.resolve(__dirname, '..', 'examples');
 const COORDINATOR_LIB = path.resolve(__dirname, '..', 'coordinator', 'lib');
 const RUBRIC_PATH = path.resolve(__dirname, '..', 'schemas', 'judge_rubric.json');
 const RDLOOP_CONFIG_PATH = path.resolve(__dirname, '..', 'rdloop.config.json');
+const WORKTREES_DIR = path.resolve(__dirname, '..', 'worktrees');
+
+// Env for coordinator so cursor-agent/codex are found (GUI may run with minimal PATH)
+function getCoordinatorEnv() {
+  const base = process.env.PATH || '';
+  const prepend = [
+    '/usr/local/bin',
+    '/opt/homebrew/bin',
+    path.join(os.homedir(), '.local', 'bin'),
+    path.join(os.homedir(), 'bin')
+  ].filter(p => p && fs.existsSync(p));
+  const seen = new Set(base.split(path.delimiter).filter(Boolean));
+  const added = prepend.filter(p => !seen.has(p));
+  added.forEach(p => seen.add(p));
+  const newPath = [...added, base].join(path.delimiter);
+  return { ...process.env, PATH: newPath };
+}
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
@@ -494,7 +511,8 @@ app.post('/api/task/:taskId/run', validateTaskId, (req, res) => {
   const child = spawn('bash', [COORDINATOR, '--continue', taskId], {
     detached: true,
     stdio: ['ignore', logFd, logFd],
-    cwd: path.resolve(__dirname, '..')
+    cwd: path.resolve(__dirname, '..'),
+    env: getCoordinatorEnv()
   });
 
   fs.writeFileSync(path.join(guiDir, 'runner.pid'), String(child.pid));
@@ -781,27 +799,22 @@ function adapterHealthcheck(name, role, scriptPath) {
     return { status: 'OK', reason: null, supports_ssh_headless: true };
   }
 
-  // cursor-agent: check cursor binary
+  // cursor-agent: Cursor execution via queue only (README ## Cursor execution); do not check cursor binary
   if (name === 'cursor-agent') {
-    if (platform === 'linux') {
-      return { status: 'UNAVAILABLE', reason: 'unsupported platform (linux)', supports_ssh_headless: false };
+    const queueCliPath = path.resolve(COORDINATOR_LIB, '..', 'adapters', 'cursor_queue_cli.sh');
+    try {
+      fs.accessSync(queueCliPath, fs.X_OK);
+      return { status: 'OK', reason: null, supports_ssh_headless: true };
+    } catch {
+      return { status: 'UNAVAILABLE', reason: 'cursor_queue_cli.sh not found or not executable (see README ## Cursor execution)', supports_ssh_headless: true };
     }
-    const cursorExists = commandExists('cursor');
-    if (!cursorExists) {
-      return { status: 'UNAVAILABLE', reason: 'missing binary: cursor', supports_ssh_headless: false };
-    }
-    return { status: 'OK', reason: null, supports_ssh_headless: false };
   }
 
-  // codex-cli: check codex binary
+  // codex-cli: check codex binary only (auth is via CLI client, not API key)
   if (name === 'codex-cli') {
     const exists = commandExists('codex');
     if (!exists) {
-      return { status: 'PARTIAL', reason: 'missing binary: codex', supports_ssh_headless: true };
-    }
-    // Check key
-    if (!process.env.OPENAI_API_KEY) {
-      return { status: 'PARTIAL', reason: 'missing key: OPENAI_API_KEY', supports_ssh_headless: true };
+      return { status: 'UNAVAILABLE', reason: 'missing binary: codex', supports_ssh_headless: true };
     }
     return { status: 'OK', reason: null, supports_ssh_headless: true };
   }
@@ -1113,13 +1126,13 @@ app.delete('/api/task_specs/:taskId', (req, res) => {
   res.json({ ok: true, task_id: taskId, trash_path: trashPath });
 });
 
-// POST /api/task_specs/:taskId/run — ensure out/<task_id> from spec then trigger coordinator (A1-3)
+// POST /api/task_specs/:taskId/run — new instance: unique task_id per run (spec_id + timestamp) so sidebar shows each run
 app.post('/api/task_specs/:taskId/run', (req, res) => {
-  const taskId = req.params.taskId;
-  if (!validateTaskSpecId(taskId)) {
+  const specTaskId = req.params.taskId;
+  if (!validateTaskSpecId(specTaskId)) {
     return res.status(400).json({ error: 'Invalid task_id format' });
   }
-  const found = findTaskSpec(taskId);
+  const found = findTaskSpec(specTaskId);
   if (!found) {
     return res.status(404).json({ error: 'Task spec not found' });
   }
@@ -1127,29 +1140,41 @@ app.post('/api/task_specs/:taskId/run', (req, res) => {
   if (!spec) {
     return res.status(500).json({ error: 'Failed to read task spec' });
   }
-  const taskDir = path.join(OUT_DIR, taskId);
-  const taskJsonPath = path.join(taskDir, 'task.json');
-  if (!fs.existsSync(taskDir)) {
-    fs.mkdirSync(taskDir, { recursive: true });
+  // Unique run task_id so each Run appears as a new row in sidebar and does not overwrite previous run
+  const now = new Date();
+  const stamp = now.getFullYear() +
+    String(now.getMonth() + 1).padStart(2, '0') +
+    String(now.getDate()).padStart(2, '0') + '_' +
+    String(now.getHours()).padStart(2, '0') +
+    String(now.getMinutes()).padStart(2, '0') +
+    String(now.getSeconds()).padStart(2, '0');
+  const runTaskId = `${specTaskId}_${stamp}`;
+  if (!VALID_TASK_ID.test(runTaskId)) {
+    return res.status(400).json({ error: 'Generated run task_id invalid (chars)' });
   }
-  const taskPayload = { ...spec, task_id: taskId };
+
+  const taskDir = path.join(OUT_DIR, runTaskId);
+  fs.mkdirSync(taskDir, { recursive: true });
+  const taskJsonPath = path.join(taskDir, 'task.json');
+  const taskPayload = { ...spec, task_id: runTaskId };
   try {
     atomicWriteJSON(taskJsonPath, taskPayload);
   } catch (err) {
     return res.status(500).json({ error: `Failed to write task.json: ${err.message}` });
   }
   const guiDir = path.join(taskDir, 'gui');
-  if (!fs.existsSync(guiDir)) fs.mkdirSync(guiDir, { recursive: true });
+  fs.mkdirSync(guiDir, { recursive: true });
   const logFile = path.join(guiDir, 'run.log');
   const logFd = fs.openSync(logFile, 'a');
-  const child = spawn('bash', [COORDINATOR, '--continue', taskId], {
+  const child = spawn('bash', [COORDINATOR, '--continue', runTaskId], {
     detached: true,
     stdio: ['ignore', logFd, logFd],
-    cwd: path.resolve(__dirname, '..')
+    cwd: path.resolve(__dirname, '..'),
+    env: getCoordinatorEnv()
   });
   fs.writeFileSync(path.join(guiDir, 'runner.pid'), String(child.pid));
   child.unref();
-  res.json({ ok: true, pid: child.pid, task_id: taskId });
+  res.json({ ok: true, pid: child.pid, task_id: runTaskId });
 });
 
 // POST /api/task_specs/:taskId/copy — copy task spec with auto-rename (A2-3)
