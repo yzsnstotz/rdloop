@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "commonjs",
+    "strict": true,
+    "esModuleInterop": true,
+    "outDir": "./built",
+    "rootDir": ".",
+    "declaration": false,
+    "sourceMap": false,
+    "skipLibCheck": true,
+    "typeRoots": ["../../gui/node_modules/@types"]
+  },
+  "include": ["decision_table.ts", "decision_table_cli.ts"]
+}

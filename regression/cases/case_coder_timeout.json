@@ -1,0 +1,26 @@
+{
+  "schema_version": "v1",
+  "task_id": "WILL_BE_REPLACED",
+  "repo_path": "WILL_BE_REPLACED",
+  "base_ref": "main",
+  "goal": "Test coder timeout: mock_timeout coder should be killed by timeout",
+  "acceptance": "Coordinator pauses with PAUSED_CODER_TIMEOUT",
+  "test_cmd": "true",
+  "max_attempts": 1,
+  "coder": "mock_timeout",
+  "judge": "mock",
+  "constraints": [],
+  "created_at": "",
+  "target_type": "external_repo",
+  "allowed_paths": [],
+  "forbidden_globs": ["**/.env", "**/secrets*", "**/*.pem"],
+  "cursor_cmd": "cursor",
+  "codex_cmd": "codex",
+  "coder_timeout_seconds": 2,
+  "judge_timeout_seconds": 300,
+  "test_timeout_seconds": 300,
+  "_expect": {
+    "state": "PAUSED",
+    "pause_reason_code": "PAUSED_CODER_TIMEOUT"
+  }
+}

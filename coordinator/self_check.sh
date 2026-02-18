@@ -48,6 +48,7 @@ for task_dir in "${OUT_DIR}"/*/; do
   [ ! -d "$task_dir" ] && continue
   task_id=$(basename "$task_dir")
   [ "$task_id" = "*" ] && continue
+  [[ "$task_id" == _* ]] && continue
   task_count=$(( task_count + 1 ))
 
   echo "--- Task: ${task_id} ---"
@@ -89,7 +90,7 @@ for task_dir in "${OUT_DIR}"/*/; do
 
       # pause_reason_code must be in enum
       prc=$(json_get "$status_file" "pause_reason_code" "")
-      valid_codes="PAUSED_CURSOR_MISSING PAUSED_CODEX_MISSING PAUSED_JUDGE_INVALID PAUSED_JUDGE_TIMEOUT PAUSED_ALLOWED_PATHS PAUSED_FORBIDDEN_GLOBS PAUSED_USER PAUSED_CRASH PAUSED_TASK_ID_CONFLICT PAUSED_NOT_GIT_REPO"
+      valid_codes="PAUSED_CURSOR_MISSING PAUSED_CODEX_MISSING PAUSED_JUDGE_INVALID PAUSED_JUDGE_TIMEOUT PAUSED_ALLOWED_PATHS PAUSED_FORBIDDEN_GLOBS PAUSED_USER PAUSED_CRASH PAUSED_TASK_ID_CONFLICT PAUSED_NOT_GIT_REPO PAUSED_CODER_AUTH_195 PAUSED_JUDGE_AUTH_195 PAUSED_CODER_TIMEOUT PAUSED_TEST_TIMEOUT PAUSED_WAITING_USER_INPUT PAUSED_SCORE_GATED PAUSED_SCORE_BELOW_THRESHOLD PAUSED_JUDGE_VERDICT_INVALID PAUSED_JUDGE_VERDICT_INCONSISTENT"
       found=0
       for vc in $valid_codes; do
         [ "$prc" = "$vc" ] && found=1
@@ -144,6 +145,34 @@ for task_dir in "${OUT_DIR}"/*/; do
       fi
     done
     [ "$fields_ok" = "1" ] && check_pass "status.json has all 11 required fields"
+
+    # Check P0 new fields: state_version, effective_max_attempts
+    sv=$(json_get "$status_file" "state_version" "__MISSING__")
+    if [ "$sv" = "__MISSING__" ] || [ "$sv" = "0" ] || [ "$sv" = "" ]; then
+      check_fail "status.json missing or zero state_version"
+    else
+      check_pass "status.json has state_version=${sv}"
+    fi
+
+    ema=$(json_get "$status_file" "effective_max_attempts" "__MISSING__")
+    if [ "$ema" = "__MISSING__" ] || [ "$ema" = "" ]; then
+      check_fail "status.json missing effective_max_attempts"
+    else
+      check_pass "status.json has effective_max_attempts=${ema}"
+    fi
+
+    # Check _index/tasks/<task_id>.json exists (A1-6)
+    index_file="${OUT_DIR}/_index/tasks/${task_id}.json"
+    if [ -f "$index_file" ]; then
+      idx_tid=$(json_get "$index_file" "task_id" "")
+      if [ "$idx_tid" = "$task_id" ]; then
+        check_pass "_index/tasks/${task_id}.json exists and valid"
+      else
+        check_fail "_index/tasks/${task_id}.json has wrong task_id='${idx_tid}'"
+      fi
+    else
+      check_fail "_index/tasks/${task_id}.json missing"
+    fi
   else
     check_fail "status.json does not exist at all"
   fi

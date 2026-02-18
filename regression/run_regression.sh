@@ -265,6 +265,124 @@ cleanup_task "$tid"
 echo ""
 
 # ================================================================
+# CASE 6: coder_timeout — coder killed by timeout → PAUSED_CODER_TIMEOUT
+# ================================================================
+log_case "Case 6: coder_timeout"
+# Requires timeout/gtimeout
+tout=""
+command -v timeout >/dev/null 2>&1 && tout="timeout"
+[ -z "$tout" ] && command -v gtimeout >/dev/null 2>&1 && tout="gtimeout"
+if [ -z "$tout" ]; then
+  echo "  [SKIP] coder_timeout: timeout/gtimeout not found"
+else
+  spec=$(prepare_spec "${CASES_DIR}/case_coder_timeout.json" "coder_to")
+  tid=$(cat /tmp/rdloop_reg_last_tid)
+
+  set +e
+  bash "$COORDINATOR" "$spec" >/dev/null 2>&1
+  rc=$?
+  set -e
+
+  if [ -f "${OUT_DIR}/${tid}/status.json" ]; then
+    state=$(json_get "${OUT_DIR}/${tid}/status.json" "state" "")
+    prc=$(json_get "${OUT_DIR}/${tid}/status.json" "pause_reason_code" "")
+    if [ "$state" = "PAUSED" ] && [ "$prc" = "PAUSED_CODER_TIMEOUT" ]; then
+      case_pass "coder_timeout: PAUSED with PAUSED_CODER_TIMEOUT"
+    else
+      case_fail "coder_timeout: state=${state} prc=${prc} (expected PAUSED/PAUSED_CODER_TIMEOUT)"
+    fi
+  else
+    case_fail "coder_timeout: status.json missing"
+  fi
+  cleanup_task "$tid"
+fi
+echo ""
+
+# ================================================================
+# CASE 7: judge_timeout — judge killed by timeout → PAUSED_JUDGE_TIMEOUT
+# ================================================================
+log_case "Case 7: judge_timeout"
+if [ -z "$tout" ]; then
+  echo "  [SKIP] judge_timeout: timeout/gtimeout not found"
+else
+  spec=$(prepare_spec "${CASES_DIR}/case_judge_timeout.json" "judge_to")
+  tid=$(cat /tmp/rdloop_reg_last_tid)
+
+  set +e
+  bash "$COORDINATOR" "$spec" >/dev/null 2>&1
+  rc=$?
+  set -e
+
+  if [ -f "${OUT_DIR}/${tid}/status.json" ]; then
+    state=$(json_get "${OUT_DIR}/${tid}/status.json" "state" "")
+    prc=$(json_get "${OUT_DIR}/${tid}/status.json" "pause_reason_code" "")
+    if [ "$state" = "PAUSED" ] && [ "$prc" = "PAUSED_JUDGE_TIMEOUT" ]; then
+      case_pass "judge_timeout: PAUSED with PAUSED_JUDGE_TIMEOUT"
+    else
+      case_fail "judge_timeout: state=${state} prc=${prc} (expected PAUSED/PAUSED_JUDGE_TIMEOUT)"
+    fi
+  else
+    case_fail "judge_timeout: status.json missing"
+  fi
+  cleanup_task "$tid"
+fi
+echo ""
+
+# ================================================================
+# CASE 8: need_user_input — judge returns NEED_USER_INPUT → PAUSED_WAITING_USER_INPUT
+# ================================================================
+log_case "Case 8: need_user_input"
+spec=$(prepare_spec "${CASES_DIR}/case_need_user_input.json" "need_input")
+tid=$(cat /tmp/rdloop_reg_last_tid)
+
+set +e
+bash "$COORDINATOR" "$spec" >/dev/null 2>&1
+rc=$?
+set -e
+
+if [ -f "${OUT_DIR}/${tid}/status.json" ]; then
+  state=$(json_get "${OUT_DIR}/${tid}/status.json" "state" "")
+  prc=$(json_get "${OUT_DIR}/${tid}/status.json" "pause_reason_code" "")
+  if [ "$state" = "PAUSED" ] && [ "$prc" = "PAUSED_WAITING_USER_INPUT" ]; then
+    case_pass "need_user_input: PAUSED with PAUSED_WAITING_USER_INPUT"
+    # Also verify questions_for_user is populated
+    q=$(json_get "${OUT_DIR}/${tid}/status.json" "questions_for_user" "[]")
+    q_len=$(python3 -c "import json,sys;print(len(json.loads(sys.argv[1])))" "$q" 2>/dev/null || echo "0")
+    if [ "$q_len" -gt 0 ]; then
+      case_pass "need_user_input: questions_for_user has ${q_len} items"
+    else
+      case_fail "need_user_input: questions_for_user empty"
+    fi
+  else
+    case_fail "need_user_input: state=${state} prc=${prc} (expected PAUSED/PAUSED_WAITING_USER_INPUT)"
+  fi
+else
+  case_fail "need_user_input: status.json missing"
+fi
+cleanup_task "$tid"
+echo ""
+
+# ================================================================
+# CASE 9: decision_table unit tests
+# ================================================================
+log_case "Case 9: decision_table unit tests"
+set +e
+dt_result=$(node --test "${RDLOOP_ROOT}/tests/unit/decision_table.test.js" 2>&1)
+dt_rc=$?
+set -e
+
+if [ "$dt_rc" = "0" ]; then
+  # Count passed tests
+  dt_pass=$(echo "$dt_result" | grep -c "^# pass" 2>/dev/null || echo "0")
+  dt_total=$(echo "$dt_result" | grep "^# tests" | awk '{print $3}' 2>/dev/null || echo "?")
+  case_pass "decision_table: ${dt_total} unit tests passed"
+else
+  case_fail "decision_table: unit tests failed (rc=${dt_rc})"
+  echo "$dt_result" | tail -10
+fi
+echo ""
+
+# ================================================================
 # Summary
 # ================================================================
 echo "================================================================"

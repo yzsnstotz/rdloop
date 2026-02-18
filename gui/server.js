@@ -12,6 +12,25 @@ const COORDINATOR = path.resolve(__dirname, '..', 'coordinator', 'run_task.sh');
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
+// Helper: validate taskId — alphanumeric, underscore, hyphen only (C0-2)
+const VALID_TASK_ID = /^[A-Za-z0-9_-]+$/;
+function isValidTaskId(taskId) {
+  return VALID_TASK_ID.test(taskId);
+}
+
+// Middleware: validate taskId param and guard path traversal (C0-2)
+function validateTaskId(req, res, next) {
+  const taskId = req.params.taskId;
+  if (!isValidTaskId(taskId)) {
+    return res.status(400).json({ error: 'Invalid task_id format' });
+  }
+  const resolved = path.resolve(OUT_DIR, taskId);
+  if (!resolved.startsWith(OUT_DIR + path.sep)) {
+    return res.status(400).json({ error: 'Invalid task_id: path traversal detected' });
+  }
+  next();
+}
+
 // Helper: safe JSON read
 function readJSON(filepath) {
   try {
@@ -31,44 +50,143 @@ function readFile(filepath, maxLines) {
   } catch { return null; }
 }
 
-// Helper: read events.jsonl
-function readEvents(filepath) {
+// Helper: read events.jsonl with half-line tolerance (K3-6)
+function readEvents(filepath, tail) {
   try {
     const content = fs.readFileSync(filepath, 'utf8');
-    return content.trim().split('\n').filter(l => l).map(l => {
-      try { return JSON.parse(l); } catch { return null; }
-    }).filter(Boolean);
+    const rawLines = content.split('\n').filter(l => l.trim());
+    const parsed = [];
+    for (const line of rawLines) {
+      try { parsed.push(JSON.parse(line)); } catch { /* drop half-line */ }
+    }
+    if (typeof tail === 'number' && tail > 0) {
+      return parsed.slice(-tail);
+    }
+    return parsed;
   } catch { return []; }
 }
 
-// GET /api/tasks — list all tasks
+// Helper: map READY -> READY_FOR_REVIEW (5.4 compat)
+function normalizeState(state) {
+  if (state === 'READY') return 'READY_FOR_REVIEW';
+  return state;
+}
+
+// Helper: state rank for cursor-based pagination ordering
+function stateRank(state) {
+  switch (normalizeState(state)) {
+    case 'RUNNING':          return 0;
+    case 'PAUSED':           return 1;
+    case 'READY_FOR_REVIEW': return 2;
+    case 'FAILED':           return 3;
+    default:                 return 4;
+  }
+}
+
+// Helper: encode/decode cursor
+function encodeCursor(obj) {
+  return Buffer.from(JSON.stringify(obj)).toString('base64url');
+}
+function decodeCursor(str) {
+  try {
+    return JSON.parse(Buffer.from(str, 'base64url').toString('utf8'));
+  } catch { return null; }
+}
+
+// Helper: compute etag for a file (K4-1)
+function computeFileEtag(filepath) {
+  try {
+    const stat = fs.statSync(filepath);
+    const raw = `${filepath}|${stat.mtimeMs}|${stat.size}`;
+    return crypto.createHash('sha256').update(raw).digest('hex').slice(0, 16);
+  } catch { return null; }
+}
+
+// GET /api/tasks — cursor-based pagination (5.1)
 app.get('/api/tasks', (req, res) => {
   try {
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 6, 1), 100);
+    const cursorStr = req.query.cursor || null;
+    const cursor = cursorStr ? decodeCursor(cursorStr) : null;
+
     const dirs = fs.readdirSync(OUT_DIR).filter(d => {
+      if (!isValidTaskId(d)) return false;
       const p = path.join(OUT_DIR, d);
-      return fs.statSync(p).isDirectory() && !d.startsWith('.');
+      try { return fs.statSync(p).isDirectory(); } catch { return false; }
     });
 
-    const tasks = dirs.map(taskId => {
+    let tasks = dirs.map(taskId => {
       const status = readJSON(path.join(OUT_DIR, taskId, 'status.json'));
+      const rawState = status?.state || 'UNKNOWN';
+      const state = normalizeState(rawState);
       return {
         task_id: taskId,
-        state: status?.state || 'UNKNOWN',
+        state,
         current_attempt: status?.current_attempt || 0,
         last_decision: status?.last_decision || '',
         message: status?.message || '',
-        updated_at: status?.updated_at || ''
+        updated_at: status?.updated_at || '',
+        _rank: stateRank(state)
       };
     });
 
-    res.json({ tasks });
+    // Sort: state_rank ASC, updated_at DESC, task_id ASC
+    tasks.sort((a, b) => {
+      if (a._rank !== b._rank) return a._rank - b._rank;
+      if (a.updated_at !== b.updated_at) return (b.updated_at || '').localeCompare(a.updated_at || '');
+      return a.task_id.localeCompare(b.task_id);
+    });
+
+    // Apply cursor: skip past cursor position
+    if (cursor) {
+      const idx = tasks.findIndex(t =>
+        t._rank === cursor.state_rank &&
+        t.updated_at === cursor.updated_at &&
+        t.task_id === cursor.task_id
+      );
+      if (idx >= 0) {
+        tasks = tasks.slice(idx + 1);
+      }
+    }
+
+    // Take limit + 1 to determine if there's a next page
+    const page = tasks.slice(0, limit);
+    const hasMore = tasks.length > limit;
+
+    // Build next_cursor
+    let next_cursor = null;
+    if (hasMore && page.length > 0) {
+      const last = page[page.length - 1];
+      next_cursor = encodeCursor({
+        state_rank: last._rank,
+        updated_at: last.updated_at,
+        task_id: last.task_id
+      });
+    }
+
+    // Strip internal _rank
+    const items = page.map(({ _rank, ...rest }) => rest);
+
+    res.json({ items, next_cursor });
   } catch (err) {
-    res.json({ tasks: [], error: err.message });
+    res.json({ items: [], next_cursor: null, error: err.message });
   }
 });
 
+// GET /api/tasks/:id/events — events with tail support (5.2)
+app.get('/api/tasks/:taskId/events', validateTaskId, (req, res) => {
+  const taskId = req.params.taskId;
+  const taskDir = path.join(OUT_DIR, taskId);
+  if (!fs.existsSync(taskDir)) {
+    return res.status(404).json({ error: 'Task not found' });
+  }
+  const tail = req.query.tail ? parseInt(req.query.tail, 10) : undefined;
+  const events = readEvents(path.join(taskDir, 'events.jsonl'), tail);
+  res.json({ events });
+});
+
 // GET /api/task/:taskId — full task detail
-app.get('/api/task/:taskId', (req, res) => {
+app.get('/api/task/:taskId', validateTaskId, (req, res) => {
   const taskId = req.params.taskId;
   const taskDir = path.join(OUT_DIR, taskId);
 
@@ -78,6 +196,7 @@ app.get('/api/task/:taskId', (req, res) => {
 
   const taskJson = readJSON(path.join(taskDir, 'task.json'));
   const status = readJSON(path.join(taskDir, 'status.json'));
+  if (status && status.state) status.state = normalizeState(status.state);
   const finalSummary = readJSON(path.join(taskDir, 'final_summary.json'));
   const events = readEvents(path.join(taskDir, 'events.jsonl'));
 
@@ -108,8 +227,34 @@ app.get('/api/task/:taskId', (req, res) => {
   });
 });
 
+// GET /api/task/:taskId/log/:logName — live log with etag/304 (K4-1)
+app.get('/api/task/:taskId/log/:logName', validateTaskId, (req, res) => {
+  const taskId = req.params.taskId;
+  const logName = req.params.logName;
+  // Only allow known log file names
+  const allowedLogs = ['run.log', 'coordinator.log'];
+  if (!allowedLogs.includes(logName)) {
+    return res.status(400).json({ error: 'Unknown log name' });
+  }
+  const logPath = path.join(OUT_DIR, taskId, 'gui', logName);
+  const etag = computeFileEtag(logPath);
+  if (!etag) {
+    return res.status(404).json({ error: 'Log not found' });
+  }
+  if (req.headers['if-none-match'] === `"${etag}"`) {
+    return res.status(304).end();
+  }
+  const tail = req.query.tail ? parseInt(req.query.tail, 10) : undefined;
+  const content = readFile(logPath, tail);
+  if (content === null) {
+    return res.status(404).json({ error: 'Log not found' });
+  }
+  res.set('ETag', `"${etag}"`);
+  res.type('text/plain').send(content);
+});
+
 // GET /api/task/:taskId/attempt/:n — attempt detail
-app.get('/api/task/:taskId/attempt/:n', (req, res) => {
+app.get('/api/task/:taskId/attempt/:n', validateTaskId, (req, res) => {
   const taskId = req.params.taskId;
   const n = parseInt(req.params.n, 10);
   const pad = String(n).padStart(3, '0');
@@ -132,7 +277,7 @@ app.get('/api/task/:taskId/attempt/:n', (req, res) => {
 });
 
 // POST /api/task/:taskId/control — write control.json
-app.post('/api/task/:taskId/control', (req, res) => {
+app.post('/api/task/:taskId/control', validateTaskId, (req, res) => {
   const taskId = req.params.taskId;
   const taskDir = path.join(OUT_DIR, taskId);
 
@@ -153,7 +298,7 @@ app.post('/api/task/:taskId/control', (req, res) => {
 });
 
 // POST /api/task/:taskId/run — trigger coordinator
-app.post('/api/task/:taskId/run', (req, res) => {
+app.post('/api/task/:taskId/run', validateTaskId, (req, res) => {
   const taskId = req.params.taskId;
   const taskDir = path.join(OUT_DIR, taskId);
   const force = req.query.force === '1';
