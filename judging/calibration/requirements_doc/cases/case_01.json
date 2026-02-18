@@ -1,0 +1,8 @@
+{
+  "case_id": "case_01",
+  "description": "Well-structured requirements doc with clear acceptance criteria and minor gaps in risk analysis",
+  "input_doc_path": "judging/calibration/requirements_doc/examples/calibration_input_01.md",
+  "task_type": "requirements_doc",
+  "calibration_version": "1.0.0",
+  "notes": "This input should score in the 'good' range (3.0-5.0) across most dimensions. Risk and exception handling may be slightly lower (2.0-4.0) due to limited mitigation detail."
+}

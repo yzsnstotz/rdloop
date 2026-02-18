@@ -6,11 +6,21 @@ Usage:
     cat verdict.json | python3 validate_verdict.py -
 
 Exit 0 = valid, Exit 1 = invalid (structural), Exit 2 = inconsistent (K5-3).
+
+C3-1/C3-2: v2 verdicts are also validated against schemas/judge_verdict_v2_schema.json
+using the jsonschema library (if installed). Schema validation errors cause exit 1.
 """
 import json
 import math
 import os
 import sys
+
+# C3-1: JSON Schema library integration (optional import — graceful degradation)
+try:
+    import jsonschema
+    _JSONSCHEMA_AVAILABLE = True
+except ImportError:
+    _JSONSCHEMA_AVAILABLE = False
 
 VALID_DECISIONS = {"PASS", "FAIL", "NEED_USER_INPUT"}
 
@@ -32,6 +42,8 @@ KEYWORD_DIM_MAX = {
 }
 
 RUBRIC_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "schemas", "judge_rubric.json")
+# C3-1: Path to the v2 JSON Schema definition
+VERDICT_V2_SCHEMA_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "schemas", "judge_verdict_v2_schema.json")
 
 
 def load_rubric():
@@ -40,6 +52,43 @@ def load_rubric():
             return json.load(f)
     except Exception:
         return None
+
+
+def load_v2_schema():
+    """Load the judge_verdict_v2_schema.json for JSON Schema validation (C3-1)."""
+    try:
+        with open(VERDICT_V2_SCHEMA_PATH, "r") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def validate_v2_jsonschema(data):
+    """C3-2: Validate v2 verdict against judge_verdict_v2_schema.json using jsonschema.
+
+    Returns list of schema validation error messages.
+    Missing required fields cause exit 1 (non-zero) via this function returning errors.
+    """
+    if not _JSONSCHEMA_AVAILABLE:
+        # jsonschema not installed — skip schema validation, warn only
+        return []
+
+    schema = load_v2_schema()
+    if schema is None:
+        # Schema file missing — skip schema validation, warn only
+        sys.stderr.write("WARN: could not load judge_verdict_v2_schema.json, skipping schema validation\n")
+        return []
+
+    errors = []
+    try:
+        validator = jsonschema.Draft7Validator(schema)
+        for err in sorted(validator.iter_errors(data), key=lambda e: list(e.path)):
+            # Format error path and message
+            path = ".".join(str(p) for p in err.path) if err.path else "(root)"
+            errors.append("schema violation at %s: %s" % (path, err.message))
+    except Exception as e:
+        errors.append("schema validation exception: %s" % str(e))
+    return errors
 
 
 def is_v2(data):
@@ -79,8 +128,15 @@ def validate_v1(data):
 
 
 def validate_v2_structural(data):
-    """V2 structural validation (B4-2). Returns list of errors."""
+    """V2 structural validation (B4-2 + C3-2). Returns list of errors."""
     errors = []
+
+    # C3-2: JSON Schema validation first (catches missing required fields per schema)
+    schema_errors = validate_v2_jsonschema(data)
+    if schema_errors:
+        errors.extend(schema_errors)
+        # If schema says required fields are missing, still run field checks below
+        # so we collect all errors in one pass. But we mark schema errors distinctly.
 
     # Run v1 checks first (v2 is superset)
     v1_errors = validate_v1(data)

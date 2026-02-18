@@ -1,0 +1,157 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "judge_verdict_v2_schema",
+  "title": "JudgeVerdict v2 Schema",
+  "description": "JSON Schema for rdloop multi-dimensional scoring verdict (v2)",
+  "type": "object",
+  "required": [
+    "decision",
+    "reasons",
+    "next_instructions",
+    "questions_for_user",
+    "task_type",
+    "scores",
+    "weights",
+    "raw_score_0_5",
+    "penalty",
+    "final_score_0_5",
+    "final_score_0_100",
+    "gated",
+    "gating_reasons",
+    "top_issues",
+    "fix_suggestions",
+    "scoring_mode_used"
+  ],
+  "properties": {
+    "decision": {
+      "type": "string",
+      "enum": ["PASS", "FAIL", "NEED_USER_INPUT"],
+      "description": "Final judge decision"
+    },
+    "reasons": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1,
+      "description": "Non-empty list of decision reasons"
+    },
+    "next_instructions": {
+      "type": "string",
+      "description": "Instructions for the next coder attempt"
+    },
+    "questions_for_user": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Questions requiring user input (non-empty when decision=NEED_USER_INPUT)"
+    },
+    "task_type": {
+      "type": "string",
+      "enum": [
+        "requirements_doc",
+        "engineering_impl",
+        "engineering_implementation",
+        "douyin_script",
+        "storyboard",
+        "paid_mini_drama"
+      ],
+      "description": "Task type used to select the rubric"
+    },
+    "scores": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 5
+      },
+      "description": "Per-dimension scores (0..5 in steps of 0.5)"
+    },
+    "weights": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1
+      },
+      "description": "Per-dimension weights (must sum to ~1.0)"
+    },
+    "raw_score_0_5": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 5,
+      "description": "Weighted sum of scores before penalty"
+    },
+    "penalty": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 2,
+      "description": "Penalty applied to raw score (0..2 in steps of 0.5)"
+    },
+    "final_score_0_5": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 5,
+      "description": "max(0, raw_score_0_5 - penalty)"
+    },
+    "final_score_0_100": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100,
+      "description": "round(20 * final_score_0_5)"
+    },
+    "gated": {
+      "type": "boolean",
+      "description": "True if any hard gate dimension is below gate_threshold"
+    },
+    "gating_reasons": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "List of reasons why verdict is gated"
+    },
+    "top_issues": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 120
+      },
+      "minItems": 2,
+      "maxItems": 5,
+      "description": "2..5 key issues, each max 120 chars"
+    },
+    "fix_suggestions": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 160
+      },
+      "maxItems": 5,
+      "description": "Up to 5 fix suggestions, each max 160 chars"
+    },
+    "scoring_mode_used": {
+      "type": "string",
+      "enum": ["rubric_analytic", "holistic_impression"],
+      "description": "Scoring mode used to produce this verdict"
+    },
+    "rubric_version_used": {
+      "type": "string",
+      "description": "Version of rubric used"
+    },
+    "rubric_hash_used": {
+      "type": "string",
+      "description": "Hash of rubric file used"
+    },
+    "thresholds_used": {
+      "type": "object",
+      "description": "Thresholds applied during scoring"
+    },
+    "deliverability_index_0_100": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "improvement_potential_0_100": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100
+    }
+  },
+  "additionalProperties": true
+}

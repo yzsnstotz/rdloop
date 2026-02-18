@@ -718,8 +718,16 @@ run_attempt() {
   goal=$(json_read "$TASK_JSON" "goal" "")
   acceptance=$(json_read "$TASK_JSON" "acceptance" "")
   test_cmd=$(json_read "$TASK_JSON" "test_cmd" "true")
-  coder_type=$(json_read "$TASK_JSON" "coder" "mock")
-  judge_type=$(json_read "$TASK_JSON" "judge" "mock")
+  coder_type=$(json_read "$TASK_JSON" "coder" "")
+  judge_type=$(json_read "$TASK_JSON" "judge" "")
+  # A6-2: Fallback to rdloop.config.json when TaskSpec does not specify coder/judge
+  local config_json="${RDLOOP_ROOT}/rdloop.config.json"
+  if [ -f "$config_json" ]; then
+    [ -z "$coder_type" ] && coder_type=$(json_read "$config_json" "default_coder" "mock")
+    [ -z "$judge_type" ] && judge_type=$(json_read "$config_json" "default_judge" "mock")
+  fi
+  [ -z "$coder_type" ] && coder_type="mock"
+  [ -z "$judge_type" ] && judge_type="mock"
   coder_timeout=$(json_read "$TASK_JSON" "coder_timeout_seconds" "600")
   test_timeout=$(json_read "$TASK_JSON" "test_timeout_seconds" "300")
   judge_timeout=$(json_read "$TASK_JSON" "judge_timeout_seconds" "300")

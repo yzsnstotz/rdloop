@@ -1,13 +1,19 @@
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
-const { spawn } = require('child_process');
+const { spawn, execFileSync } = require('child_process');
 const crypto = require('crypto');
+const os = require('os');
 
 const app = express();
 const PORT = 17333;
 const OUT_DIR = path.resolve(__dirname, '..', 'out');
 const COORDINATOR = path.resolve(__dirname, '..', 'coordinator', 'run_task.sh');
+const TASKS_DIR = path.resolve(__dirname, '..', 'tasks');
+const EXAMPLES_DIR = path.resolve(__dirname, '..', 'examples');
+const COORDINATOR_LIB = path.resolve(__dirname, '..', 'coordinator', 'lib');
+const RUBRIC_PATH = path.resolve(__dirname, '..', 'schemas', 'judge_rubric.json');
+const RDLOOP_CONFIG_PATH = path.resolve(__dirname, '..', 'rdloop.config.json');
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
@@ -48,6 +54,21 @@ function readFile(filepath, maxLines) {
     }
     return content;
   } catch { return null; }
+}
+
+// E1-1: Normalize updated_at to second-level UTC Z (K1-5)
+function normalizeUpdatedAt(ts) {
+  if (ts == null || ts === '') return ts;
+  const s = String(ts).trim();
+  if (!s) return ts;
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(s)) return s;
+  const msMatch = s.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\.\d+Z$/);
+  if (msMatch) return msMatch[1] + 'Z';
+  try {
+    const d = new Date(s);
+    if (!isNaN(d.getTime())) return d.toISOString().replace(/\.\d{3}Z$/, 'Z');
+  } catch {}
+  return ts;
 }
 
 // Helper: read events.jsonl with half-line tolerance (K3-6)
@@ -102,6 +123,25 @@ function computeFileEtag(filepath) {
   } catch { return null; }
 }
 
+// D1-1: Atomic write helper — temp → flush → fsync → rename (K1-3)
+function atomicWriteJSON(filepath, data) {
+  const dir = path.dirname(filepath);
+  fs.mkdirSync(dir, { recursive: true });
+  const tmp = filepath + '.tmp.' + crypto.randomBytes(6).toString('hex');
+  const fd = fs.openSync(tmp, 'w');
+  try {
+    const content = JSON.stringify(data, null, 2) + '\n';
+    fs.writeSync(fd, content);
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fs.renameSync(tmp, filepath);
+  } catch (err) {
+    try { fs.closeSync(fd); } catch {}
+    try { fs.unlinkSync(tmp); } catch {}
+    throw err;
+  }
+}
+
 // GET /api/tasks — cursor-based pagination (5.1)
 app.get('/api/tasks', (req, res) => {
   try {
@@ -125,7 +165,7 @@ app.get('/api/tasks', (req, res) => {
         current_attempt: status?.current_attempt || 0,
         last_decision: status?.last_decision || '',
         message: status?.message || '',
-        updated_at: status?.updated_at || '',
+        updated_at: normalizeUpdatedAt(status?.updated_at) || '',
         _rank: stateRank(state)
       };
     });
@@ -196,7 +236,10 @@ app.get('/api/task/:taskId', validateTaskId, (req, res) => {
 
   const taskJson = readJSON(path.join(taskDir, 'task.json'));
   const status = readJSON(path.join(taskDir, 'status.json'));
-  if (status && status.state) status.state = normalizeState(status.state);
+  if (status) {
+    if (status.state) status.state = normalizeState(status.state);
+    if (status.updated_at) status.updated_at = normalizeUpdatedAt(status.updated_at);
+  }
   const finalSummary = readJSON(path.join(taskDir, 'final_summary.json'));
   const events = readEvents(path.join(taskDir, 'events.jsonl'));
 
@@ -227,33 +270,97 @@ app.get('/api/task/:taskId', validateTaskId, (req, res) => {
   });
 });
 
-// GET /api/task/:taskId/log/:logName — live log with etag/304 (K4-1)
+// B2-1: Resolve live log path — stdout.log/stderr.log → run.log → old naming fallback
+function resolveLiveLogPath(taskDir, logName) {
+  const guiDir = path.join(taskDir, 'gui');
+  const roleByLog = { 'coordinator.log': 'coordinator', 'coder.log': 'coder', 'judge.log': 'judge' };
+  const role = roleByLog[logName];
+  if (logName === 'run.log') {
+    const p = path.join(guiDir, 'run.log');
+    return fs.existsSync(p) ? p : null;
+  }
+  if (role === 'coordinator') {
+    const candidates = [
+      path.join(guiDir, 'run.log'),
+      path.join(guiDir, 'coordinator.log')
+    ];
+    for (const p of candidates) {
+      if (fs.existsSync(p)) return p;
+    }
+    return null;
+  }
+  if (role === 'coder' || role === 'judge') {
+    let attempts = [];
+    try {
+      attempts = fs.readdirSync(taskDir)
+        .filter(d => /^attempt_\d+$/.test(d))
+        .sort()
+        .reverse();
+    } catch {}
+    for (const attDir of attempts) {
+      const roleDir = path.join(taskDir, attDir, role);
+      const runLog = path.join(roleDir, 'run.log');
+      const stdoutLog = path.join(roleDir, 'stdout.log');
+      const stderrLog = path.join(roleDir, 'stderr.log');
+      if (fs.existsSync(runLog)) return runLog;
+      const parts = [];
+      if (fs.existsSync(stdoutLog)) { const c = readFile(stdoutLog); if (c) parts.push(c); }
+      if (fs.existsSync(stderrLog)) { const c = readFile(stderrLog); if (c) parts.push(c); }
+      if (parts.length) return { synthetic: parts.join('\n--- stderr ---\n') };
+      const oldNames = role === 'coder'
+        ? [path.join(roleDir, 'cursor_stdout.log'), path.join(roleDir, 'cursor_stderr.log')]
+        : [path.join(roleDir, 'codex_stderr.log')];
+      for (const p of oldNames) {
+        if (fs.existsSync(p)) return p;
+      }
+    }
+    const guiRoleLog = path.join(guiDir, logName);
+    if (fs.existsSync(guiRoleLog)) return guiRoleLog;
+    return null;
+  }
+  return null;
+}
+
+// GET /api/task/:taskId/log/:logName — live log with etag/304 (K4-1), B2-1 unified path
 app.get('/api/task/:taskId/log/:logName', validateTaskId, (req, res) => {
   const taskId = req.params.taskId;
   const logName = req.params.logName;
-  // Only allow known log file names
-  const allowedLogs = ['run.log', 'coordinator.log'];
+  const allowedLogs = ['run.log', 'coordinator.log', 'coder.log', 'judge.log'];
   if (!allowedLogs.includes(logName)) {
     return res.status(400).json({ error: 'Unknown log name' });
   }
-  const logPath = path.join(OUT_DIR, taskId, 'gui', logName);
-  const etag = computeFileEtag(logPath);
-  if (!etag) {
-    return res.status(404).json({ error: 'Log not found' });
+  const taskDir = path.join(OUT_DIR, taskId);
+  const resolved = resolveLiveLogPath(taskDir, logName);
+  const roleByLog = { 'coordinator.log': 'coordinator', 'coder.log': 'coder', 'judge.log': 'judge' };
+  const role = roleByLog[logName] || logName.replace('.log', '');
+  if (!resolved) {
+    const msg = `No logs found for role=${role}`;
+    const etag = crypto.createHash('sha256').update(msg).digest('hex').slice(0, 16);
+    if (req.headers['if-none-match'] === `"${etag}"`) return res.status(304).end();
+    res.set('ETag', `"${etag}"`);
+    return res.type('text/plain').send(msg);
   }
-  if (req.headers['if-none-match'] === `"${etag}"`) {
-    return res.status(304).end();
+  let logPath = typeof resolved === 'string' ? resolved : null;
+  let content = null;
+  if (typeof resolved === 'object' && resolved.synthetic) {
+    content = resolved.synthetic;
+  } else if (logPath) {
+    content = readFile(logPath, req.query.tail ? parseInt(req.query.tail, 10) : undefined);
   }
-  const tail = req.query.tail ? parseInt(req.query.tail, 10) : undefined;
-  const content = readFile(logPath, tail);
-  if (content === null) {
-    return res.status(404).json({ error: 'Log not found' });
+  if (content == null || content === '') {
+    const msg = `No logs found for role=${role}`;
+    const etag = crypto.createHash('sha256').update(msg).digest('hex').slice(0, 16);
+    if (req.headers['if-none-match'] === `"${etag}"`) return res.status(304).end();
+    res.set('ETag', `"${etag}"`);
+    return res.type('text/plain').send(msg);
   }
+  const etag = logPath ? computeFileEtag(logPath) : crypto.createHash('sha256').update(String(content)).digest('hex').slice(0, 16);
+  if (req.headers['if-none-match'] === `"${etag}"`) return res.status(304).end();
   res.set('ETag', `"${etag}"`);
   res.type('text/plain').send(content);
 });
 
-// GET /api/task/:taskId/attempt/:n — attempt detail
+// GET /api/task/:taskId/attempt/:n — attempt detail (B3: fixed field set)
 app.get('/api/task/:taskId/attempt/:n', validateTaskId, (req, res) => {
   const taskId = req.params.taskId;
   const n = parseInt(req.params.n, 10);
@@ -264,15 +371,79 @@ app.get('/api/task/:taskId/attempt/:n', validateTaskId, (req, res) => {
     return res.status(404).json({ error: 'Attempt not found' });
   }
 
+  // B3-1: Fixed field set — paths (null if absent), rc, verdict_summary
+  const coderDir = path.join(attDir, 'coder');
+  const judgeDir = path.join(attDir, 'judge');
+
+  function existsOrNull(p) {
+    return fs.existsSync(p) ? p.replace(OUT_DIR + path.sep, '') : null;
+  }
+
+  const paths = {
+    prompt: existsOrNull(path.join(coderDir, 'prompt.txt')),
+    stdout: existsOrNull(path.join(coderDir, 'stdout.log')),
+    stderr: existsOrNull(path.join(coderDir, 'stderr.log')),
+    run_log: existsOrNull(path.join(coderDir, 'run.log')),
+    rc: existsOrNull(path.join(coderDir, 'rc.txt')),
+    verdict: existsOrNull(path.join(judgeDir, 'verdict.json')),
+    extract_err: existsOrNull(path.join(judgeDir, 'extract_err.log'))
+  };
+
+  // rc: read numeric rc from coder/rc.txt (or judge/rc.txt fallback)
+  let rc = null;
+  const rcRaw = readFile(path.join(coderDir, 'rc.txt'))?.trim() || readFile(path.join(attDir, 'test', 'rc.txt'))?.trim();
+  if (rcRaw !== null && rcRaw !== undefined) {
+    const parsed = parseInt(rcRaw, 10);
+    if (!isNaN(parsed)) rc = parsed;
+  }
+
+  // updated_at: from status.json or attempt dir mtime
+  let updated_at = null;
+  const status = readJSON(path.join(OUT_DIR, taskId, 'status.json'));
+  if (status?.updated_at) {
+    updated_at = status.updated_at;
+  } else {
+    try {
+      const stat = fs.statSync(attDir);
+      updated_at = stat.mtime.toISOString().replace(/\.\d{3}Z$/, 'Z');
+    } catch {}
+  }
+
+  // verdict_summary: from verdict.json
+  const verdict = readJSON(path.join(judgeDir, 'verdict.json'));
+  const verdictSummary = {
+    final_score_0_100: verdict?.final_score_0_100 ?? null,
+    gated: verdict?.gated ?? null,
+    pause_reason_code: status?.pause_reason_code ?? null,
+    top_issues: Array.isArray(verdict?.top_issues) ? verdict.top_issues.slice(0, 2) : []
+  };
+
+  // Legacy fields for backward compat
+  const evidence = readJSON(path.join(attDir, 'evidence.json'));
+  const metrics = readJSON(path.join(attDir, 'metrics.json'));
+  const testLog = readFile(path.join(attDir, 'test', 'stdout.log'), 400);
+  const diffStat = readFile(path.join(attDir, 'git', 'diff.stat'));
+  const instruction = readFile(path.join(coderDir, 'instruction.txt')) || readFile(path.join(attDir, 'coder', 'instruction.txt'));
+  const env = readJSON(path.join(attDir, 'env.json'));
+
   res.json({
-    evidence: readJSON(path.join(attDir, 'evidence.json')),
-    verdict: readJSON(path.join(attDir, 'judge', 'verdict.json')),
-    metrics: readJSON(path.join(attDir, 'metrics.json')),
-    test_rc: readFile(path.join(attDir, 'test', 'rc.txt'))?.trim() || null,
-    test_log: readFile(path.join(attDir, 'test', 'stdout.log'), 400),
-    diff_stat: readFile(path.join(attDir, 'git', 'diff.stat')),
-    instruction: readFile(path.join(attDir, 'coder', 'instruction.txt')),
-    env: readJSON(path.join(attDir, 'env.json'))
+    // B3-1: Fixed field set
+    task_id: taskId,
+    attempt: n,
+    role: 'coder',
+    paths,
+    rc,
+    updated_at,
+    verdict_summary: verdictSummary,
+    // Legacy fields for backward compat (B3-2 frontend uses fixed fields above)
+    verdict,
+    evidence,
+    metrics,
+    test_rc: rcRaw || null,
+    test_log: testLog,
+    diff_stat: diffStat,
+    instruction,
+    env
   });
 });
 
@@ -381,10 +552,11 @@ app.get('/api/tasks/:taskId/status', validateTaskId, (req, res) => {
     return res.status(404).json({ error: 'status.json not found' });
   }
   if (status.state) status.state = normalizeState(status.state);
+  if (status.updated_at) status.updated_at = normalizeUpdatedAt(status.updated_at);
   res.json(status);
 });
 
-// POST /api/tasks/:taskId/runtime_overrides — atomic write runtime_overrides.json + audit
+// POST /api/tasks/:taskId/runtime_overrides — D1: atomic write + max_attempts range [current_attempt, 50]
 app.post('/api/tasks/:taskId/runtime_overrides', validateTaskId, (req, res) => {
   const taskId = req.params.taskId;
   const taskDir = path.join(OUT_DIR, taskId);
@@ -399,28 +571,60 @@ app.post('/api/tasks/:taskId/runtime_overrides', validateTaskId, (req, res) => {
   if (!overrides || typeof overrides !== 'object') {
     return res.status(400).json({ error: 'overrides object is required' });
   }
+
+  // D1-2: max_attempts validation range [current_attempt, 50]
   if (overrides.max_attempts !== undefined) {
     const ma = overrides.max_attempts;
-    if (!Number.isInteger(ma) || ma < 1 || ma > 10) {
-      return res.status(400).json({ error: 'max_attempts must be integer in [1, 10]' });
+    if (!Number.isInteger(ma) || ma > 50) {
+      return res.status(400).json({ error: 'max_attempts must be integer ≤ 50' });
+    }
+    // Read current_attempt from status.json
+    const status = readJSON(path.join(taskDir, 'status.json'));
+    const currentAttempt = status?.current_attempt ?? 0;
+    if (ma < currentAttempt) {
+      return res.status(400).json({
+        error: `max_attempts must be >= current_attempt (${currentAttempt})`,
+        current_attempt: currentAttempt
+      });
     }
   }
+
+  // D1-1: Read old value for audit history
+  const overridesPath = path.join(taskDir, 'runtime_overrides.json');
+  const oldPayload = readJSON(overridesPath);
 
   const payload = {
     overrides,
     request_id,
     written_at: new Date().toISOString()
   };
-  fs.writeFileSync(path.join(taskDir, 'runtime_overrides.json'), JSON.stringify(payload, null, 2));
 
+  // D1-1: Atomic write — temp → flush → fsync → rename (K1-3)
+  atomicWriteJSON(overridesPath, payload);
+
+  // Audit with old/new for rollback support (A5-0)
   auditLog({
     actor: 'gui',
     source: 'http',
     action: 'runtime_overrides',
     task_id: taskId,
     request_id,
-    payload: overrides
+    old: oldPayload?.overrides ?? null,
+    new: overrides
   });
+
+  // Append to runtime_overrides_history.jsonl for rollback (A5-0)
+  try {
+    if (!fs.existsSync(AUDIT_DIR)) fs.mkdirSync(AUDIT_DIR, { recursive: true });
+    const histLine = JSON.stringify({
+      ts: new Date().toISOString(),
+      task_id: taskId,
+      request_id,
+      old: oldPayload?.overrides ?? null,
+      new: overrides
+    }) + '\n';
+    fs.appendFileSync(path.join(AUDIT_DIR, 'runtime_overrides_history.jsonl'), histLine);
+  } catch { /* best effort */ }
 
   res.json({ ok: true, request_id });
 });
@@ -463,7 +667,14 @@ app.post('/api/tasks/:taskId/user_input', validateTaskId, (req, res) => {
     text,
     request_id
   };
-  fs.appendFileSync(inputFile, JSON.stringify(entry) + '\n');
+  const line = JSON.stringify(entry) + '\n';
+  const fd = fs.openSync(inputFile, 'a');
+  try {
+    fs.writeSync(fd, line);
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
 
   auditLog({
     actor: 'gui',
@@ -475,6 +686,512 @@ app.post('/api/tasks/:taskId/user_input', validateTaskId, (req, res) => {
   });
 
   res.json({ ok: true, request_id });
+});
+
+// ================================================================
+// A4: GET /api/rubric/:task_type — rubric dimensions/weights/gates
+// ================================================================
+app.get('/api/rubric/:task_type', (req, res) => {
+  const taskType = req.params.task_type;
+  const rubric = readJSON(RUBRIC_PATH);
+  if (!rubric) {
+    return res.status(500).json({ error: 'Failed to load judge_rubric.json' });
+  }
+  // Resolve alias (e.g. engineering_implementation → engineering_impl)
+  const aliasMap = rubric.alias_map || {};
+  const resolved = aliasMap[taskType] || taskType;
+  const typeData = rubric.task_types?.[resolved];
+  if (!typeData) {
+    return res.status(404).json({
+      error: `Unknown task_type: ${taskType}`,
+      available: Object.keys(rubric.task_types || {})
+    });
+  }
+  res.json({
+    task_type: resolved,
+    dimensions: typeData.dimensions || [],
+    weights: typeData.weights || {},
+    hard_gates: typeData.hard_gates || [],
+    gate_threshold: typeData.gate_threshold ?? 2.0,
+    penalty_rules: typeData.penalty_rules || []
+  });
+});
+
+// ================================================================
+// A5: GET /api/adapters — adapter list + healthcheck (C1-1)
+// ================================================================
+
+// A5-1: Detect known adapters from coordinator/lib/call_* scripts
+function detectAdapters() {
+  const adapters = [];
+  let files = [];
+  try {
+    files = fs.readdirSync(COORDINATOR_LIB).filter(f => f.startsWith('call_'));
+  } catch {
+    return adapters;
+  }
+
+  for (const file of files) {
+    // Parse name: call_coder_cursor.sh → type=coder, name=cursor-agent
+    const match = file.match(/^call_(coder|judge)_(.+)\.sh$/);
+    if (!match) continue;
+    const role = match[1]; // 'coder' or 'judge'
+    const rawName = match[2]; // e.g. 'cursor', 'mock', 'codex', 'mock_timeout'
+
+    const scriptPath = path.join(COORDINATOR_LIB, file);
+
+    // Map raw name to adapter name
+    const nameMap = {
+      'cursor': 'cursor-agent',
+      'mock': 'mock',
+      'mock_timeout': 'mock-timeout',
+      'codex': 'codex-cli',
+      'claude': 'claude-cli',
+      'openai': 'openai-api',
+      'moonshot': 'moonshot-api',
+      'openrouter': 'openrouter-api'
+    };
+    const adapterName = nameMap[rawName] || rawName;
+
+    // A5-1: healthcheck
+    const health = adapterHealthcheck(adapterName, role, scriptPath);
+    adapters.push({
+      name: adapterName,
+      type: role,
+      script: file,
+      status: health.status,
+      reason: health.reason,
+      supports_ssh_headless: health.supports_ssh_headless
+    });
+  }
+
+  return adapters;
+}
+
+function adapterHealthcheck(name, role, scriptPath) {
+  // Check if script file exists and is executable
+  if (!fs.existsSync(scriptPath)) {
+    return { status: 'UNAVAILABLE', reason: 'script not found', supports_ssh_headless: false };
+  }
+
+  const platform = os.platform();
+
+  // Mock adapters are always available
+  if (name.startsWith('mock')) {
+    return { status: 'OK', reason: null, supports_ssh_headless: true };
+  }
+
+  // cursor-agent: check cursor binary
+  if (name === 'cursor-agent') {
+    if (platform === 'linux') {
+      return { status: 'UNAVAILABLE', reason: 'unsupported platform (linux)', supports_ssh_headless: false };
+    }
+    const cursorExists = commandExists('cursor');
+    if (!cursorExists) {
+      return { status: 'UNAVAILABLE', reason: 'missing binary: cursor', supports_ssh_headless: false };
+    }
+    return { status: 'OK', reason: null, supports_ssh_headless: false };
+  }
+
+  // codex-cli: check codex binary
+  if (name === 'codex-cli') {
+    const exists = commandExists('codex');
+    if (!exists) {
+      return { status: 'PARTIAL', reason: 'missing binary: codex', supports_ssh_headless: true };
+    }
+    // Check key
+    if (!process.env.OPENAI_API_KEY) {
+      return { status: 'PARTIAL', reason: 'missing key: OPENAI_API_KEY', supports_ssh_headless: true };
+    }
+    return { status: 'OK', reason: null, supports_ssh_headless: true };
+  }
+
+  // claude-cli: check claude binary
+  if (name === 'claude-cli') {
+    const exists = commandExists('claude');
+    if (!exists) {
+      return { status: 'PARTIAL', reason: 'missing binary: claude', supports_ssh_headless: true };
+    }
+    if (!process.env.ANTHROPIC_API_KEY) {
+      return { status: 'PARTIAL', reason: 'missing key: ANTHROPIC_API_KEY', supports_ssh_headless: true };
+    }
+    return { status: 'OK', reason: null, supports_ssh_headless: true };
+  }
+
+  // openai-api: check key
+  if (name === 'openai-api') {
+    if (!process.env.OPENAI_API_KEY) {
+      return { status: 'UNAVAILABLE', reason: 'missing key: OPENAI_API_KEY', supports_ssh_headless: true };
+    }
+    return { status: 'OK', reason: null, supports_ssh_headless: true };
+  }
+
+  // moonshot-api: check key
+  if (name === 'moonshot-api') {
+    if (!process.env.MOONSHOT_API_KEY) {
+      return { status: 'UNAVAILABLE', reason: 'missing key: MOONSHOT_API_KEY', supports_ssh_headless: true };
+    }
+    return { status: 'OK', reason: null, supports_ssh_headless: true };
+  }
+
+  // openrouter-api: check key
+  if (name === 'openrouter-api') {
+    if (!process.env.OPENROUTER_API_KEY) {
+      return { status: 'UNAVAILABLE', reason: 'missing key: OPENROUTER_API_KEY', supports_ssh_headless: true };
+    }
+    return { status: 'OK', reason: null, supports_ssh_headless: true };
+  }
+
+  return { status: 'UNKNOWN', reason: 'unrecognized adapter', supports_ssh_headless: false };
+}
+
+function commandExists(cmd) {
+  try {
+    execFileSync('which', [cmd], { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+app.get('/api/adapters', (req, res) => {
+  try {
+    const adapters = detectAdapters();
+    res.json({ adapters });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// A6-1: GET/PUT /api/config — default coder/judge from rdloop.config.json (C1-2)
+function readRdloopConfig() {
+  try {
+    if (fs.existsSync(RDLOOP_CONFIG_PATH)) {
+      const data = readJSON(RDLOOP_CONFIG_PATH);
+      return data || {};
+    }
+  } catch {}
+  return {};
+}
+
+app.get('/api/config', (req, res) => {
+  try {
+    const cfg = readRdloopConfig();
+    res.json({
+      default_coder: cfg.default_coder || null,
+      default_judge: cfg.default_judge || null
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/config', (req, res) => {
+  try {
+    const { default_coder, default_judge } = req.body || {};
+    const cfg = readRdloopConfig();
+    if (default_coder !== undefined) cfg.default_coder = default_coder;
+    if (default_judge !== undefined) cfg.default_judge = default_judge;
+    atomicWriteJSON(RDLOOP_CONFIG_PATH, cfg);
+    res.json({ ok: true, default_coder: cfg.default_coder || null, default_judge: cfg.default_judge || null });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ================================================================
+// A2: TaskSpec CRUD — /api/task_specs (E2)
+// ================================================================
+
+// Helper: find task spec dirs (tasks/ then examples/)
+function getTaskSpecDirs() {
+  return [TASKS_DIR, EXAMPLES_DIR].filter(d => {
+    try { return fs.statSync(d).isDirectory(); } catch { return false; }
+  });
+}
+
+function findTaskSpec(taskId) {
+  for (const dir of getTaskSpecDirs()) {
+    const p = path.join(dir, `${taskId}.json`);
+    if (fs.existsSync(p)) return { filepath: p, dir };
+  }
+  return null;
+}
+
+function validateTaskSpecId(id) {
+  return VALID_TASK_ID.test(id);
+}
+
+// A3-1/A3-2: Validate task spec data — JSON already parsed; optional schema-style checks
+function validateTaskSpecData(spec) {
+  const errors = [];
+  if (!spec || typeof spec !== 'object') {
+    return { valid: false, errors: ['spec must be an object'] };
+  }
+  if (spec.task_id !== undefined && !validateTaskSpecId(String(spec.task_id))) {
+    errors.push('task_id: invalid format (alphanumeric, underscore, hyphen only)');
+  }
+  if (spec.max_attempts !== undefined && (typeof spec.max_attempts !== 'number' || spec.max_attempts < 1 || spec.max_attempts > 50)) {
+    errors.push('max_attempts: must be number between 1 and 50');
+  }
+  if (spec.task_type && !['requirements_doc', 'engineering_impl', 'douyin_script', 'storyboard', 'paid_mini_drama', ''].includes(spec.task_type)) {
+    errors.push('task_type: invalid enum value');
+  }
+  if (spec.scoring_mode && !['rubric_analytic', 'holistic_impression', ''].includes(spec.scoring_mode)) {
+    errors.push('scoring_mode: invalid enum value');
+  }
+  return { valid: errors.length === 0, errors };
+}
+
+// GET /api/task_specs — list all task specs from tasks/ and examples/ (A1-1)
+app.get('/api/task_specs', (req, res) => {
+  try {
+    const specs = [];
+    for (const dir of getTaskSpecDirs()) {
+      let files = [];
+      try { files = fs.readdirSync(dir).filter(f => f.endsWith('.json')); } catch { continue; }
+      for (const file of files) {
+        const taskId = file.replace(/\.json$/, '');
+        if (!validateTaskSpecId(taskId)) continue;
+        const filePath = path.join(dir, file);
+        const data = readJSON(filePath);
+        if (!data) continue;
+        let updated_at = null;
+        try {
+          const stat = fs.statSync(filePath);
+          updated_at = stat.mtime.toISOString().replace(/\.\d{3}Z$/, 'Z');
+        } catch {}
+        specs.push({
+          task_id: taskId,
+          file_path: filePath,
+          updated_at: normalizeUpdatedAt(updated_at),
+          task_type: data.task_type || null,
+          scoring_mode: data.scoring_mode || null,
+          coder: data.coder || null,
+          judge: data.judge || null,
+          goal: data.goal || null,
+          source_dir: path.basename(dir)
+        });
+      }
+    }
+    res.json({ specs });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/task_specs/:taskId — read a task spec
+app.get('/api/task_specs/:taskId', (req, res) => {
+  const taskId = req.params.taskId;
+  if (!validateTaskSpecId(taskId)) {
+    return res.status(400).json({ error: 'Invalid task_id format' });
+  }
+  const found = findTaskSpec(taskId);
+  if (!found) {
+    return res.status(404).json({ error: 'Task spec not found' });
+  }
+  const data = readJSON(found.filepath);
+  if (!data) {
+    return res.status(500).json({ error: 'Failed to read task spec' });
+  }
+  res.json({ task_id: taskId, spec: data, source_dir: path.basename(found.dir) });
+});
+
+// POST /api/task_specs — create a new task spec (A2-2), A3 validation
+app.post('/api/task_specs', (req, res) => {
+  const { task_id, spec, target_dir } = req.body || {};
+  if (!task_id || !validateTaskSpecId(task_id)) {
+    return res.status(400).json({ error: 'Invalid or missing task_id' });
+  }
+  if (!spec || typeof spec !== 'object') {
+    return res.status(400).json({ error: 'spec object is required' });
+  }
+  const validation = validateTaskSpecData(spec);
+  if (!validation.valid) {
+    return res.status(400).json({ error: 'Validation failed', errors: validation.errors });
+  }
+
+  // Normalize task_type alias
+  if (spec.task_type === 'engineering_implementation') {
+    spec.task_type = 'engineering_impl';
+  }
+
+  // Choose save directory: tasks/ preferred, fallback to examples/
+  let saveDir;
+  if (target_dir === 'examples') {
+    saveDir = EXAMPLES_DIR;
+  } else {
+    saveDir = TASKS_DIR;
+    if (!fs.existsSync(saveDir)) fs.mkdirSync(saveDir, { recursive: true });
+  }
+
+  const filepath = path.join(saveDir, `${task_id}.json`);
+  // C0-2: path traversal check
+  if (!filepath.startsWith(saveDir + path.sep) && filepath !== path.join(saveDir, `${task_id}.json`)) {
+    return res.status(400).json({ error: 'Path traversal detected' });
+  }
+
+  if (fs.existsSync(filepath)) {
+    return res.status(409).json({ error: `Task spec '${task_id}' already exists` });
+  }
+
+  const data = { ...spec, task_id, created_at: spec.created_at || new Date().toISOString() };
+
+  try {
+    atomicWriteJSON(filepath, data);
+  } catch (err) {
+    return res.status(500).json({ error: `Failed to write task spec: ${err.message}` });
+  }
+
+  auditLog({ action: 'task_spec_create', task_id, source_dir: path.basename(saveDir) });
+  res.json({ ok: true, task_id, source_dir: path.basename(saveDir) });
+});
+
+// PUT /api/task_specs/:taskId — update an existing task spec (A2-5), A3 validation
+app.put('/api/task_specs/:taskId', (req, res) => {
+  const taskId = req.params.taskId;
+  if (!validateTaskSpecId(taskId)) {
+    return res.status(400).json({ error: 'Invalid task_id format' });
+  }
+  const { spec } = req.body || {};
+  if (!spec || typeof spec !== 'object') {
+    return res.status(400).json({ error: 'spec object is required' });
+  }
+  const validation = validateTaskSpecData(spec);
+  if (!validation.valid) {
+    return res.status(400).json({ error: 'Validation failed', errors: validation.errors });
+  }
+
+  // Normalize task_type alias
+  if (spec.task_type === 'engineering_implementation') {
+    spec.task_type = 'engineering_impl';
+  }
+
+  const found = findTaskSpec(taskId);
+  if (!found) {
+    return res.status(404).json({ error: 'Task spec not found' });
+  }
+
+  const data = { ...spec, task_id: taskId };
+  try {
+    atomicWriteJSON(found.filepath, data);
+  } catch (err) {
+    return res.status(500).json({ error: `Failed to write task spec: ${err.message}` });
+  }
+
+  auditLog({ action: 'task_spec_update', task_id: taskId, source_dir: path.basename(found.dir) });
+  res.json({ ok: true, task_id: taskId });
+});
+
+// DELETE /api/task_specs/:taskId — soft-delete to trash/ (A2-4)
+app.delete('/api/task_specs/:taskId', (req, res) => {
+  const taskId = req.params.taskId;
+  if (!validateTaskSpecId(taskId)) {
+    return res.status(400).json({ error: 'Invalid task_id format' });
+  }
+
+  const found = findTaskSpec(taskId);
+  if (!found) {
+    return res.status(404).json({ error: 'Task spec not found' });
+  }
+
+  // Soft-delete to trash/ within the same parent directory
+  const trashDir = path.join(found.dir, 'trash');
+  if (!fs.existsSync(trashDir)) fs.mkdirSync(trashDir, { recursive: true });
+
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  const trashName = `${taskId}_${ts}.json`;
+  const trashPath = path.join(trashDir, trashName);
+
+  try {
+    fs.renameSync(found.filepath, trashPath);
+  } catch (err) {
+    return res.status(500).json({ error: `Failed to move to trash: ${err.message}` });
+  }
+
+  auditLog({ action: 'task_spec_delete', task_id: taskId, trash_path: trashPath });
+  res.json({ ok: true, task_id: taskId, trash_path: trashPath });
+});
+
+// POST /api/task_specs/:taskId/run — ensure out/<task_id> from spec then trigger coordinator (A1-3)
+app.post('/api/task_specs/:taskId/run', (req, res) => {
+  const taskId = req.params.taskId;
+  if (!validateTaskSpecId(taskId)) {
+    return res.status(400).json({ error: 'Invalid task_id format' });
+  }
+  const found = findTaskSpec(taskId);
+  if (!found) {
+    return res.status(404).json({ error: 'Task spec not found' });
+  }
+  const spec = readJSON(found.filepath);
+  if (!spec) {
+    return res.status(500).json({ error: 'Failed to read task spec' });
+  }
+  const taskDir = path.join(OUT_DIR, taskId);
+  const taskJsonPath = path.join(taskDir, 'task.json');
+  if (!fs.existsSync(taskDir)) {
+    fs.mkdirSync(taskDir, { recursive: true });
+  }
+  const taskPayload = { ...spec, task_id: taskId };
+  try {
+    atomicWriteJSON(taskJsonPath, taskPayload);
+  } catch (err) {
+    return res.status(500).json({ error: `Failed to write task.json: ${err.message}` });
+  }
+  const guiDir = path.join(taskDir, 'gui');
+  if (!fs.existsSync(guiDir)) fs.mkdirSync(guiDir, { recursive: true });
+  const logFile = path.join(guiDir, 'run.log');
+  const logFd = fs.openSync(logFile, 'a');
+  const child = spawn('bash', [COORDINATOR, '--continue', taskId], {
+    detached: true,
+    stdio: ['ignore', logFd, logFd],
+    cwd: path.resolve(__dirname, '..')
+  });
+  fs.writeFileSync(path.join(guiDir, 'runner.pid'), String(child.pid));
+  child.unref();
+  res.json({ ok: true, pid: child.pid, task_id: taskId });
+});
+
+// POST /api/task_specs/:taskId/copy — copy task spec with auto-rename (A2-3)
+app.post('/api/task_specs/:taskId/copy', (req, res) => {
+  const srcTaskId = req.params.taskId;
+  if (!validateTaskSpecId(srcTaskId)) {
+    return res.status(400).json({ error: 'Invalid task_id format' });
+  }
+
+  const found = findTaskSpec(srcTaskId);
+  if (!found) {
+    return res.status(404).json({ error: 'Task spec not found' });
+  }
+
+  const srcData = readJSON(found.filepath);
+  if (!srcData) {
+    return res.status(500).json({ error: 'Failed to read source task spec' });
+  }
+
+  // Auto-rename: hello_world → hello_world_copy → hello_world_copy_2 → ...
+  let newId = `${srcTaskId}_copy`;
+  let counter = 2;
+  while (findTaskSpec(newId)) {
+    newId = `${srcTaskId}_copy_${counter++}`;
+  }
+
+  const saveDir = found.dir;
+  const newPath = path.join(saveDir, `${newId}.json`);
+  const newData = {
+    ...srcData,
+    task_id: newId,
+    created_at: new Date().toISOString()
+  };
+
+  try {
+    atomicWriteJSON(newPath, newData);
+  } catch (err) {
+    return res.status(500).json({ error: `Failed to copy task spec: ${err.message}` });
+  }
+
+  auditLog({ action: 'task_spec_copy', src_task_id: srcTaskId, new_task_id: newId });
+  res.json({ ok: true, task_id: newId, source_dir: path.basename(saveDir) });
 });
 
 app.listen(PORT, () => {

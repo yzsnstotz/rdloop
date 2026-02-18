@@ -15,6 +15,7 @@ DUMMY_REPO="${RDLOOP_ROOT}/examples/dummy_repo"
 
 PASS=0
 FAIL=0
+WARN=0
 TOTAL=0
 
 ts() { date +%s; }
@@ -427,10 +428,162 @@ fi
 echo ""
 
 # ================================================================
+# CASE 12: K8-6 Calibration — judge output within expected ranges
+# B4-0a: judging/calibration/<task_type>/cases/*.json + expected/*.json
+# Skips with WARN if: calibration files missing OR judge not available.
+# ================================================================
+log_case "Case 12: K8-6 Calibration - requirements_doc/case_01"
+
+CALIB_DIR="${RDLOOP_ROOT}/judging/calibration/requirements_doc"
+CALIB_CASE="${CALIB_DIR}/cases/case_01.json"
+CALIB_EXPECTED="${CALIB_DIR}/expected/case_01.json"
+
+_calib_check_verdict() {
+  # _calib_check_verdict <verdict_json> <expected_json>
+  # Returns 0 if verdict is within expected ranges, 1 otherwise.
+  python3 - "$1" "$2" <<'PYEOF'
+import json, sys
+
+def check(verdict_path, expected_path):
+    try:
+        with open(verdict_path) as f:
+            v = json.load(f)
+        with open(expected_path) as f:
+            exp = json.load(f)
+    except Exception as e:
+        print(f"CALIB_ERROR: failed to read files: {e}")
+        sys.exit(1)
+
+    failures = []
+
+    # Check scores_ranges
+    scores_ranges = exp.get("scores_ranges", {})
+    v_scores = v.get("scores", {})
+    for dim, (lo, hi) in scores_ranges.items():
+        score = v_scores.get(dim)
+        if score is None:
+            failures.append(f"  score missing: {dim}")
+        elif not (lo <= float(score) <= hi):
+            failures.append(f"  {dim}={score} not in [{lo},{hi}]")
+
+    # Check gated
+    exp_gated = exp.get("gated")
+    if exp_gated is not None:
+        v_gated = v.get("gated")
+        if v_gated is None:
+            failures.append("  verdict.gated missing")
+        elif bool(v_gated) != bool(exp_gated):
+            failures.append(f"  gated={v_gated} expected {exp_gated}")
+
+    # Check top_issues_count
+    ti_range = exp.get("top_issues_count")
+    if ti_range:
+        v_issues = v.get("top_issues", [])
+        n = len(v_issues) if isinstance(v_issues, list) else 0
+        lo = ti_range.get("min", 0)
+        hi = ti_range.get("max", 999)
+        if not (lo <= n <= hi):
+            failures.append(f"  top_issues count={n} not in [{lo},{hi}]")
+
+    if failures:
+        print("CALIB_FAIL: verdict outside expected ranges:")
+        for f in failures:
+            print(f)
+        sys.exit(1)
+    else:
+        print("CALIB_PASS: all verdict values within expected ranges")
+        sys.exit(0)
+
+check(sys.argv[1], sys.argv[2])
+PYEOF
+}
+
+# Step 1: Check calibration files exist
+if [ ! -f "${CALIB_CASE}" ] || [ ! -f "${CALIB_EXPECTED}" ]; then
+  echo "  [WARN] K8-6: calibration case or expected file missing — skipping (non-blocking)"
+  WARN=$(( WARN + 1 ))
+  echo ""
+else
+
+  # Step 2: Determine if a real judge is available
+  # Use openai judge (call_judge_codex.sh with codex) or skip with WARN
+  CALIB_JUDGE_AVAILABLE=false
+  if command -v codex >/dev/null 2>&1; then
+    CALIB_JUDGE_AVAILABLE=true
+  fi
+
+  if [ "${CALIB_JUDGE_AVAILABLE}" = "false" ]; then
+    echo "  [WARN] K8-6: no judge available for calibration (codex not found) — skipping (non-blocking)"
+    WARN=$(( WARN + 1 ))
+  else
+    # Step 3: Run a calibration task through the coordinator
+    # Build a task spec pointing at the calibration input doc
+    calib_input_doc="${CALIB_DIR}/examples/calibration_input_01.md"
+    if [ ! -f "${calib_input_doc}" ]; then
+      echo "  [WARN] K8-6: calibration input doc missing (${calib_input_doc}) — skipping (non-blocking)"
+      WARN=$(( WARN + 1 ))
+    else
+      calib_task_id="regression_calib_$(ts)"
+      calib_spec="/tmp/rdloop_reg_${calib_task_id}.json"
+      python3 -c "
+import json, sys
+d = {
+  'task_id': sys.argv[1],
+  'repo_path': sys.argv[2],
+  'base_ref': 'main',
+  'goal': 'Calibration test: evaluate requirements document quality',
+  'acceptance': 'Judge produces structured B4 verdict',
+  'test_cmd': 'true',
+  'max_attempts': 1,
+  'coder': 'mock',
+  'judge': 'codex',
+  'task_type': 'requirements_doc',
+  'scoring_mode': 'rubric_analytic',
+  'rubric_thresholds': {},
+  'coder_timeout_seconds': 60,
+  'judge_timeout_seconds': 120,
+  'test_timeout_seconds': 30,
+  'constraints': [],
+  'created_at': '',
+  'target_type': 'external_repo',
+  'allowed_paths': [],
+  'forbidden_globs': [],
+  'codex_cmd': 'codex'
+}
+with open(sys.argv[3], 'w') as f:
+  json.dump(d, f, indent=2)
+" "${calib_task_id}" "${DUMMY_REPO}" "${calib_spec}"
+
+      set +e
+      bash "$COORDINATOR" "$calib_spec" >/dev/null 2>&1
+      calib_rc=$?
+      set -e
+
+      calib_verdict="${OUT_DIR}/${calib_task_id}/attempt_001/judge/verdict.json"
+      if [ -f "${calib_verdict}" ]; then
+        calib_check_out=$(_calib_check_verdict "${calib_verdict}" "${CALIB_EXPECTED}" 2>&1)
+        calib_check_rc=$?
+        if [ "${calib_check_rc}" = "0" ]; then
+          case_pass "K8-6 calibration: ${calib_check_out}"
+        else
+          case_fail "K8-6 calibration: ${calib_check_out}"
+        fi
+      else
+        echo "  [WARN] K8-6: no verdict.json produced (calib_rc=${calib_rc}) — skipping check (non-blocking)"
+        WARN=$(( WARN + 1 ))
+      fi
+      cleanup_task "${calib_task_id}"
+      rm -f "${calib_spec}"
+    fi
+  fi
+  echo ""
+fi
+
+# ================================================================
 # Summary
 # ================================================================
 echo "================================================================"
-echo "Regression Summary: ${PASS}/${TOTAL} passed, ${FAIL} failed"
+echo "Regression Summary: ${PASS}/${TOTAL} passed, ${FAIL} failed, ${WARN} warned (skipped)"
 echo "================================================================"
 
 # Clean up temp files

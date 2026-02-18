@@ -21,14 +21,27 @@
         "acceptance_testability": 0.18,
         "risk_and_exception": 0.12,
         "constraints_and_compliance": 0.14,
-        "feasibility": 0.10,
-        "structure_and_readability": 0.10
+        "feasibility": 0.1,
+        "structure_and_readability": 0.1
       },
-      "hard_gates": ["clarity", "completeness", "acceptance_testability", "constraints_and_compliance"],
-      "gate_threshold": 2.0,
+      "hard_gates": [
+        "clarity",
+        "completeness",
+        "acceptance_testability",
+        "constraints_and_compliance"
+      ],
+      "gate_threshold": 2,
       "penalty_rules": [
-        {"trigger": "secrets_forbidden_globs", "penalty": 2, "force_gated": true},
-        {"trigger": "missing_acceptance_criteria", "penalty": 1.5, "force_gated": true}
+        {
+          "trigger": "secrets_forbidden_globs",
+          "penalty": 2,
+          "force_gated": true
+        },
+        {
+          "trigger": "missing_acceptance_criteria",
+          "penalty": 1.5,
+          "force_gated": true
+        }
       ]
     },
     "engineering_impl": {
@@ -42,19 +55,32 @@
         "performance"
       ],
       "weights": {
-        "correctness": 0.20,
+        "correctness": 0.2,
         "runnability": 0.18,
         "test_and_validation": 0.16,
         "security": 0.14,
         "architecture_and_modularity": 0.12,
-        "readability_and_maintainability": 0.10,
-        "performance": 0.10
+        "readability_and_maintainability": 0.1,
+        "performance": 0.1
       },
-      "hard_gates": ["correctness", "runnability", "test_and_validation", "security"],
-      "gate_threshold": 2.0,
+      "hard_gates": [
+        "correctness",
+        "runnability",
+        "test_and_validation",
+        "security"
+      ],
+      "gate_threshold": 2,
       "penalty_rules": [
-        {"trigger": "secrets_forbidden_globs", "penalty": 2, "force_gated": true},
-        {"trigger": "test_cmd_fails", "penalty": 1.5, "force_gated": false}
+        {
+          "trigger": "secrets_forbidden_globs",
+          "penalty": 2,
+          "force_gated": true
+        },
+        {
+          "trigger": "test_cmd_fails",
+          "penalty": 1.5,
+          "force_gated": false
+        }
       ]
     },
     "douyin_script": {
@@ -74,12 +100,19 @@
         "audience_engagement": 0.14,
         "platform_compliance": 0.12,
         "visual_cue_alignment": 0.12,
-        "call_to_action": 0.10
+        "call_to_action": 0.1
       },
-      "hard_gates": ["content_accuracy", "platform_compliance"],
-      "gate_threshold": 2.0,
+      "hard_gates": [
+        "content_accuracy",
+        "platform_compliance"
+      ],
+      "gate_threshold": 2,
       "penalty_rules": [
-        {"trigger": "banned_content", "penalty": 2, "force_gated": true}
+        {
+          "trigger": "banned_content",
+          "penalty": 2,
+          "force_gated": true
+        }
       ]
     },
     "storyboard": {
@@ -99,12 +132,19 @@
         "dialogue_quality": 0.14,
         "pacing_and_rhythm": 0.12,
         "production_feasibility": 0.12,
-        "emotional_arc": 0.10
+        "emotional_arc": 0.1
       },
-      "hard_gates": ["narrative_coherence", "scene_completeness"],
-      "gate_threshold": 2.0,
+      "hard_gates": [
+        "narrative_coherence",
+        "scene_completeness"
+      ],
+      "gate_threshold": 2,
       "penalty_rules": [
-        {"trigger": "missing_scene_descriptions", "penalty": 1, "force_gated": false}
+        {
+          "trigger": "missing_scene_descriptions",
+          "penalty": 1,
+          "force_gated": false
+        }
       ]
     },
     "paid_mini_drama": {
@@ -124,13 +164,21 @@
         "episode_structure": 0.14,
         "dialogue_naturalness": 0.12,
         "cliffhanger_quality": 0.12,
-        "production_notes": 0.10
+        "production_notes": 0.1
       },
-      "hard_gates": ["monetization_hook", "plot_tension"],
-      "gate_threshold": 2.0,
+      "hard_gates": [
+        "monetization_hook",
+        "plot_tension"
+      ],
+      "gate_threshold": 2,
       "penalty_rules": [
-        {"trigger": "no_paywall_trigger", "penalty": 1.5, "force_gated": true}
+        {
+          "trigger": "no_paywall_trigger",
+          "penalty": 1.5,
+          "force_gated": true
+        }
       ]
     }
-  }
+  },
+  "rubric_hash": "d8a638982910f50143d3ff15f761a82bea43ac0c102764672c7ec0c1270ab236"
 }

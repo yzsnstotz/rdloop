@@ -8,7 +8,25 @@
       "Bash(git -C /Volumes/yzliu/work/projects/rdloop/examples/dummy_repo commit -m \"Initial commit\")",
       "Bash(git -C /Volumes/yzliu/work/projects/rdloop/examples/dummy_repo log --oneline)",
       "Bash(bash:*)",
-      "Bash(git checkout:*)"
+      "Bash(git checkout:*)",
+      "Bash(test:*)",
+      "Bash(REQ=\"/Users/yzliu/work/projects/rdloop/docs/requirement/requirement 2nd.md\")",
+      "Bash(SCORE=\"/Users/yzliu/work/projects/rdloop/docs/评分规则-Judge-Scoring-Rules.md\")",
+      "Bash(SCOPE=\"$HOME/claude/claude.md\")",
+      "Bash(__NEW_LINE_ab1490231894c572__ ls -la \"$REQ\" \"$SCORE\" \"$SCOPE\")",
+      "Bash(git add:*)",
+      "Bash(git restore:*)",
+      "Bash(git commit:*)",
+      "Bash(echo:*)",
+      "Bash(brew install:*)",
+      "Bash(node --test:*)",
+      "Bash(python3:*)",
+      "Bash(node -e \"\nconst { execSync } = require\\(''child_process''\\);\ntry {\n  execSync\\(''python3 -c \"\"exit\\(1\\)\"\"'', { stdio: ''pipe'' }\\);\n} catch\\(e\\) { console.log\\(''status:'', e.status\\); }\ntry {\n  execSync\\(''python3 -c \"\"exit\\(2\\)\"\"'', { stdio: ''pipe'' }\\);\n} catch\\(e\\) { console.log\\(''status:'', e.status\\); }\n\")",
+      "Bash(ls:*)",
+      "Bash(node -e:*)",
+      "Bash(curl:*)",
+      "Bash(lsof:*)",
+      "Bash(xargs kill:*)"
     ]
   }
 }

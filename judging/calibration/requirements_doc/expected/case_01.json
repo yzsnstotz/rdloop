@@ -1,0 +1,16 @@
+{
+  "case_id": "case_01",
+  "description": "Expected verdict ranges for calibration_input_01.md — well-structured requirements doc with minor gaps",
+  "scores_ranges": {
+    "clarity": [3.0, 5.0],
+    "completeness": [3.0, 5.0],
+    "acceptance_testability": [3.0, 5.0],
+    "risk_and_exception": [2.0, 4.5],
+    "constraints_and_compliance": [3.0, 5.0],
+    "feasibility": [3.0, 5.0],
+    "structure_and_readability": [3.5, 5.0]
+  },
+  "gated": false,
+  "top_issues_count": {"min": 0, "max": 5},
+  "notes": "This input has clear requirements, good acceptance criteria, and explicit constraints. Risk/exception handling is partially covered (open questions). Should not be gated."
+}
