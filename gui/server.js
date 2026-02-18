@@ -332,6 +332,151 @@ app.post('/api/task/:taskId/run', validateTaskId, (req, res) => {
   res.json({ ok: true, pid: child.pid });
 });
 
+// ================================================================
+// API extensions for OpenClaw Telegram integration (Epic A)
+// ================================================================
+
+const START_TIME = Date.now();
+const AUDIT_DIR = path.join(OUT_DIR, '_audit');
+
+// Helper: ensure audit dir exists and append to audit log (K7-3)
+function auditLog(entry) {
+  try {
+    if (!fs.existsSync(AUDIT_DIR)) fs.mkdirSync(AUDIT_DIR, { recursive: true });
+    const line = JSON.stringify({ ts: new Date().toISOString(), ...entry }) + '\n';
+    fs.appendFileSync(path.join(AUDIT_DIR, 'gui_actions.jsonl'), line);
+  } catch { /* best effort */ }
+}
+
+// GET /api/health — uptime + task count
+app.get('/api/health', (req, res) => {
+  try {
+    let taskCount = 0;
+    if (fs.existsSync(OUT_DIR)) {
+      const dirs = fs.readdirSync(OUT_DIR).filter(d => {
+        if (!isValidTaskId(d)) return false;
+        try { return fs.statSync(path.join(OUT_DIR, d)).isDirectory(); } catch { return false; }
+      });
+      taskCount = dirs.length;
+    }
+    res.json({
+      status: 'ok',
+      uptime_ms: Date.now() - START_TIME,
+      task_count: taskCount
+    });
+  } catch (err) {
+    res.status(500).json({ status: 'error', error: err.message });
+  }
+});
+
+// GET /api/tasks/:taskId/status — status.json content (normalized)
+app.get('/api/tasks/:taskId/status', validateTaskId, (req, res) => {
+  const taskId = req.params.taskId;
+  const taskDir = path.join(OUT_DIR, taskId);
+  if (!fs.existsSync(taskDir)) {
+    return res.status(404).json({ error: 'Task not found' });
+  }
+  const status = readJSON(path.join(taskDir, 'status.json'));
+  if (!status) {
+    return res.status(404).json({ error: 'status.json not found' });
+  }
+  if (status.state) status.state = normalizeState(status.state);
+  res.json(status);
+});
+
+// POST /api/tasks/:taskId/runtime_overrides — atomic write runtime_overrides.json + audit
+app.post('/api/tasks/:taskId/runtime_overrides', validateTaskId, (req, res) => {
+  const taskId = req.params.taskId;
+  const taskDir = path.join(OUT_DIR, taskId);
+  if (!fs.existsSync(taskDir)) {
+    return res.status(404).json({ error: 'Task not found' });
+  }
+
+  const { overrides, request_id } = req.body || {};
+  if (!request_id || typeof request_id !== 'string') {
+    return res.status(400).json({ error: 'request_id is required' });
+  }
+  if (!overrides || typeof overrides !== 'object') {
+    return res.status(400).json({ error: 'overrides object is required' });
+  }
+  if (overrides.max_attempts !== undefined) {
+    const ma = overrides.max_attempts;
+    if (!Number.isInteger(ma) || ma < 1 || ma > 10) {
+      return res.status(400).json({ error: 'max_attempts must be integer in [1, 10]' });
+    }
+  }
+
+  const payload = {
+    overrides,
+    request_id,
+    written_at: new Date().toISOString()
+  };
+  fs.writeFileSync(path.join(taskDir, 'runtime_overrides.json'), JSON.stringify(payload, null, 2));
+
+  auditLog({
+    actor: 'gui',
+    source: 'http',
+    action: 'runtime_overrides',
+    task_id: taskId,
+    request_id,
+    payload: overrides
+  });
+
+  res.json({ ok: true, request_id });
+});
+
+// POST /api/tasks/:taskId/user_input — append to user_input.jsonl + audit
+app.post('/api/tasks/:taskId/user_input', validateTaskId, (req, res) => {
+  const taskId = req.params.taskId;
+  const taskDir = path.join(OUT_DIR, taskId);
+  if (!fs.existsSync(taskDir)) {
+    return res.status(404).json({ error: 'Task not found' });
+  }
+
+  const { text, request_id } = req.body || {};
+  if (!request_id || typeof request_id !== 'string') {
+    return res.status(400).json({ error: 'request_id is required' });
+  }
+  if (!text || typeof text !== 'string') {
+    return res.status(400).json({ error: 'text is required' });
+  }
+
+  // Dedup: check request_id in last 100 lines (A5-4)
+  const inputFile = path.join(taskDir, 'user_input.jsonl');
+  try {
+    if (fs.existsSync(inputFile)) {
+      const content = fs.readFileSync(inputFile, 'utf8');
+      const lines = content.split('\n').filter(l => l.trim()).slice(-100);
+      for (const line of lines) {
+        try {
+          const entry = JSON.parse(line);
+          if (entry.request_id === request_id) {
+            return res.json({ ok: true, request_id, deduplicated: true });
+          }
+        } catch { /* skip malformed lines */ }
+      }
+    }
+  } catch { /* if read fails, proceed */ }
+
+  const entry = {
+    ts: new Date().toISOString(),
+    text,
+    request_id
+  };
+  fs.appendFileSync(inputFile, JSON.stringify(entry) + '\n');
+
+  auditLog({
+    actor: 'gui',
+    source: 'http',
+    action: 'user_input',
+    task_id: taskId,
+    request_id,
+    payload: { text }
+  });
+
+  res.json({ ok: true, request_id });
+});
+
 app.listen(PORT, () => {
   console.log(`rdloop GUI running at http://localhost:${PORT}`);
   console.log(`OUT_DIR: ${OUT_DIR}`);

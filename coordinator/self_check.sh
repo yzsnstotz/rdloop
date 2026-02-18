@@ -180,6 +180,35 @@ for task_dir in "${OUT_DIR}"/*/; do
   fi
 
   # =========================================================
+  # CHECK 2b: B4 verdict field checks
+  # =========================================================
+  echo " Check 2b: B4 verdict fields"
+  # Scan attempt dirs for verdicts with task_type + scores → verify scoring_mode_used + rubric_version_used
+  b4_checked=0
+  for att_d in "${task_dir}"attempt_*/; do
+    [ ! -d "$att_d" ] && continue
+    verdict_f="${att_d}judge/verdict.json"
+    [ ! -f "$verdict_f" ] && continue
+    vtt=$(json_get "$verdict_f" "task_type" "")
+    vsc=$(json_get "$verdict_f" "scores" "")
+    if [ -n "$vtt" ] && [ -n "$vsc" ] && [ "$vsc" != "{}" ]; then
+      b4_checked=1
+      sm=$(json_get "$verdict_f" "scoring_mode_used" "")
+      rv=$(json_get "$verdict_f" "rubric_version_used" "")
+      if [ -z "$sm" ]; then
+        check_fail "B4 verdict in $(basename "$att_d") missing scoring_mode_used"
+      elif [ -z "$rv" ]; then
+        check_fail "B4 verdict in $(basename "$att_d") missing rubric_version_used"
+      else
+        check_pass "B4 verdict in $(basename "$att_d"): scoring_mode=${sm} rubric=${rv}"
+      fi
+    fi
+  done
+  if [ "$b4_checked" = "0" ]; then
+    check_pass "No B4 verdicts to check (pre-B4 task)"
+  fi
+
+  # =========================================================
   # CHECK 3: Auto-advance verification
   # =========================================================
   echo " Check 3: Auto-advance (FAIL + attempt < max → next attempt)"

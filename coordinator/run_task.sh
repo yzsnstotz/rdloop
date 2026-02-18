@@ -333,13 +333,13 @@ act_on_decision() {
   case "$ns" in
     READY_FOR_REVIEW)
       write_status "READY_FOR_REVIEW" "$att_num" "$max_att" "false" "$ld" "$msg" "$qj" "" ""
-      write_final_summary "READY_FOR_REVIEW" "$ld" "$att_num" "$max_att" "$msg" "$qj" "" "" "$hc"
+      write_final_summary "READY_FOR_REVIEW" "$ld" "$att_num" "$max_att" "$msg" "$qj" "" "" "$hc" "${final_score_for_summary:-}"
       write_event "$att_num" "STATE_CHANGED" "READY_FOR_REVIEW"
       NORMAL_EXIT=1; exit 0
       ;;
     FAILED)
       write_status "FAILED" "$att_num" "$max_att" "false" "$ld" "$msg" "$qj" "" ""
-      write_final_summary "FAILED" "$ld" "$att_num" "$max_att" "$msg" "$qj" "" "" "$hc"
+      write_final_summary "FAILED" "$ld" "$att_num" "$max_att" "$msg" "$qj" "" "" "$hc" "${final_score_for_summary:-}"
       write_event "$att_num" "STATE_CHANGED" "FAILED"
       NORMAL_EXIT=1; exit 0
       ;;
@@ -922,7 +922,8 @@ print(json.dumps(cs))
       python3 "${LIB_DIR}/validate_verdict.py" "${att_dir}/judge/verdict.json" 2>/dev/null
       local vrc=$?
       set -e
-      if [ "$vrc" = "0" ]; then jvalid=1; break; fi
+      # exit 0=valid, exit 2=K5-3 inconsistent (structurally valid, flagged in DECISION)
+      if [ "$vrc" = "0" ] || [ "$vrc" = "2" ]; then jvalid=1; break; fi
       log_info "Verdict invalid (retry $((j_retries+1)))"
     else
       log_info "Judge failed rc=${judge_rc} (retry $((j_retries+1)))"
@@ -952,18 +953,66 @@ print(json.dumps(cs))
   check_control_pause "AFTER_JUDGE"
 
   # ---- DECISION (via decision_table) ----
+  # 1. Run validate_verdict.py to check structural + K5-3 consistency
+  local validate_rc=0
+  set +e
+  python3 "${LIB_DIR}/validate_verdict.py" "${att_dir}/judge/verdict.json" 2>/dev/null
+  validate_rc=$?
+  set -e
+
+  local error_class=""
+  if [ "$validate_rc" = "1" ]; then
+    error_class="VERDICT_INVALID"
+    log_info "Verdict structurally invalid (validate_verdict exit 1)"
+  elif [ "$validate_rc" = "2" ]; then
+    error_class="VERDICT_INCONSISTENT"
+    log_info "Verdict K5-3 inconsistent (validate_verdict exit 2)"
+  fi
+
+  # 2. Read decision and detect B4 mode
   local decision; decision=$(json_read "${att_dir}/judge/verdict.json" "decision" "FAIL")
   local verdict_gated="false"
   local thresholds_pass="true"
-  # Read score-based fields from verdict if present
-  local score; score=$(json_read "${att_dir}/judge/verdict.json" "score" "")
-  local gated_threshold; gated_threshold=$(json_read "$TASK_JSON" "score_gate" "")
-  local min_threshold; min_threshold=$(json_read "$TASK_JSON" "score_threshold" "")
-  if [ -n "$gated_threshold" ] && [ -n "$score" ]; then
-    [ "$score" -lt "$gated_threshold" ] 2>/dev/null && verdict_gated="true"
+  local final_score_for_summary=""
+
+  local has_task_type; has_task_type=$(json_read "${att_dir}/judge/verdict.json" "task_type" "")
+  local has_scores; has_scores=$(json_read "${att_dir}/judge/verdict.json" "scores" "")
+  if [ -n "$has_task_type" ] && [ -n "$has_scores" ] && [ "$has_scores" != "{}" ]; then
+    # B4 mode: read gated and final_score directly from verdict
+    verdict_gated=$(json_read "${att_dir}/judge/verdict.json" "gated" "false")
+    local final_score; final_score=$(json_read "${att_dir}/judge/verdict.json" "final_score_0_5" "0")
+    final_score_for_summary=$(json_read "${att_dir}/judge/verdict.json" "final_score_0_100" "")
+    thresholds_pass="true"
+    # Check thresholds from task.json or rubric defaults
+    local min_threshold; min_threshold=$(json_read "$TASK_JSON" "rubric_thresholds.min_score" "")
+    if [ -n "$min_threshold" ]; then
+      python3 -c "exit(0 if float('$final_score') >= float('$min_threshold') else 1)" 2>/dev/null || thresholds_pass="false"
+    fi
+    log_info "B4 verdict: task_type=${has_task_type} gated=${verdict_gated} final_0_5=${final_score} thresholds_pass=${thresholds_pass}"
+  else
+    # Legacy v1 mode: keep existing score/score_gate/score_threshold logic
+    local score; score=$(json_read "${att_dir}/judge/verdict.json" "score" "")
+    local gated_threshold; gated_threshold=$(json_read "$TASK_JSON" "score_gate" "")
+    local min_threshold; min_threshold=$(json_read "$TASK_JSON" "score_threshold" "")
+    if [ -n "$gated_threshold" ] && [ -n "$score" ]; then
+      [ "$score" -lt "$gated_threshold" ] 2>/dev/null && verdict_gated="true"
+    fi
+    if [ -n "$min_threshold" ] && [ -n "$score" ]; then
+      [ "$score" -lt "$min_threshold" ] 2>/dev/null && thresholds_pass="false"
+    fi
   fi
-  if [ -n "$min_threshold" ] && [ -n "$score" ]; then
-    [ "$score" -lt "$min_threshold" ] 2>/dev/null && thresholds_pass="false"
+
+  # If validate_verdict returned an error, route through decision_table with error_class
+  if [ -n "$error_class" ]; then
+    local att_e; att_e=$(date +%s)
+    local att_s_e; att_s_e=$(epoch_from_iso "$att_start")
+    local el=$(( att_e - att_s_e ))
+    write_metrics "$att_dir" "$att_num" "$el" "$j_retries" "$coder_rc" "$test_rc" "$judge_rc" \
+      "$att_start" "$c_start" "$c_fin" "$t_start" "$t_fin" "$j_start" "$j_fin" "[]"
+    update_consecutive_timeout "judge" "$judge_rc"
+    local dj; dj=$(call_decision_table "judge" "$judge_rc" "$error_class" "$decision" "$verdict_gated" "$thresholds_pass")
+    act_on_decision "$dj" "$hc" "$att_num" "$max_att"
+    NORMAL_EXIT=1; exit 0
   fi
 
   local att_e; att_e=$(date +%s)

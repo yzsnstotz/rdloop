@@ -1,0 +1,17 @@
+{
+  "name": "openclaw",
+  "version": "0.1.0",
+  "description": "OpenClaw — Telegram bot for rdloop monitoring and control",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "node --test ../tests/unit/openclaw_*.test.js"
+  },
+  "dependencies": {
+    "node-telegram-bot-api": "^0.66.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "private": true
+}

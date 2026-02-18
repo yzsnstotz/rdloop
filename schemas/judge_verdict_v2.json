@@ -1,0 +1,50 @@
+{
+  "_comment": "JudgeVerdict v2 — extended multi-dimensional scoring verdict (example/reference)",
+  "schema_version": "v2",
+  "decision": "PASS",
+  "reasons": ["All dimensions score above threshold"],
+  "next_instructions": "",
+  "questions_for_user": [],
+  "task_type": "engineering_impl",
+  "scores": {
+    "correctness": 4.5,
+    "runnability": 5.0,
+    "test_and_validation": 4.0,
+    "security": 4.5,
+    "architecture_and_modularity": 3.5,
+    "readability_and_maintainability": 4.0,
+    "performance": 3.5
+  },
+  "weights": {
+    "correctness": 0.20,
+    "runnability": 0.18,
+    "test_and_validation": 0.16,
+    "security": 0.14,
+    "architecture_and_modularity": 0.12,
+    "readability_and_maintainability": 0.10,
+    "performance": 0.10
+  },
+  "raw_score_0_5": 4.27,
+  "penalty": 0,
+  "final_score_0_5": 4.27,
+  "final_score_0_100": 85,
+  "gated": false,
+  "gating_reasons": [],
+  "top_issues": [
+    "Architecture could benefit from better separation of concerns",
+    "Performance optimization opportunities in hot path"
+  ],
+  "fix_suggestions": [
+    "Extract data access layer into separate module",
+    "Add caching for frequently accessed lookups"
+  ],
+  "deliverability_index_0_100": 90,
+  "improvement_potential_0_100": 15,
+  "scoring_mode_used": "rubric_analytic",
+  "rubric_version_used": "1.0.0",
+  "rubric_hash_used": "",
+  "thresholds_used": {
+    "gate_threshold": 2.0,
+    "min_score": 3.0
+  }
+}

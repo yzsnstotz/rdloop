@@ -1,13 +1,12 @@
 {
-  "_comment": "TaskSpec v1 - rdloop task specification schema (example/reference)",
   "schema_version": "v1",
-  "task_id": "example_task_001",
-  "repo_path": "/absolute/path/to/repo",
+  "task_id": "WILL_BE_REPLACED",
+  "repo_path": "WILL_BE_REPLACED",
   "base_ref": "main",
-  "goal": "Describe what to achieve",
-  "acceptance": "Describe acceptance criteria",
-  "test_cmd": "bash run_tests.sh",
-  "max_attempts": 3,
+  "goal": "B4 verdict integration test",
+  "acceptance": "test_cmd returns 0",
+  "test_cmd": "true",
+  "max_attempts": 1,
   "coder": "mock",
   "judge": "mock",
   "constraints": [],
@@ -20,7 +19,11 @@
   "coder_timeout_seconds": 600,
   "judge_timeout_seconds": 300,
   "test_timeout_seconds": 300,
-  "task_type": "",
+  "task_type": "engineering_impl",
   "scoring_mode": "rubric_analytic",
-  "rubric_thresholds": {}
+  "rubric_thresholds": {},
+  "_expect": {
+    "final_decision": "READY_FOR_REVIEW",
+    "last_decision": "PASS"
+  }
 }

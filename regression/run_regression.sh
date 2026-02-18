@@ -363,9 +363,53 @@ cleanup_task "$tid"
 echo ""
 
 # ================================================================
-# CASE 9: decision_table unit tests
+# CASE 9: B4 verdict task (task_type + scoring_mode in spec)
 # ================================================================
-log_case "Case 9: decision_table unit tests"
+log_case "Case 9: b4_verdict"
+spec=$(prepare_spec "${CASES_DIR}/case_b4_verdict.json" "b4_verdict")
+tid=$(cat /tmp/rdloop_reg_last_tid)
+
+set +e
+bash "$COORDINATOR" "$spec" >/dev/null 2>&1
+rc=$?
+set -e
+
+if [ "$rc" = "0" ] && [ -f "${OUT_DIR}/${tid}/final_summary.json" ]; then
+  dec=$(json_get "${OUT_DIR}/${tid}/final_summary.json" "decision" "")
+  ld=$(json_get "${OUT_DIR}/${tid}/final_summary.json" "last_decision" "")
+  if [ "$dec" = "READY_FOR_REVIEW" ] && [ "$ld" = "PASS" ]; then
+    case_pass "b4_verdict: READY_FOR_REVIEW + PASS"
+  else
+    case_fail "b4_verdict: decision=${dec} last_decision=${ld} (expected READY_FOR_REVIEW/PASS)"
+  fi
+else
+  case_fail "b4_verdict: rc=${rc} or final_summary missing"
+fi
+cleanup_task "$tid"
+echo ""
+
+# ================================================================
+# CASE 10: validate_verdict unit tests
+# ================================================================
+log_case "Case 10: validate_verdict unit tests"
+set +e
+vv_result=$(node --test "${RDLOOP_ROOT}/tests/unit/validate_verdict.test.js" 2>&1)
+vv_rc=$?
+set -e
+
+if [ "$vv_rc" = "0" ]; then
+  vv_total=$(echo "$vv_result" | grep "^# tests" | awk '{print $3}' 2>/dev/null || echo "?")
+  case_pass "validate_verdict: ${vv_total} unit tests passed"
+else
+  case_fail "validate_verdict: unit tests failed (rc=${vv_rc})"
+  echo "$vv_result" | tail -10
+fi
+echo ""
+
+# ================================================================
+# CASE 11: decision_table unit tests
+# ================================================================
+log_case "Case 11: decision_table unit tests"
 set +e
 dt_result=$(node --test "${RDLOOP_ROOT}/tests/unit/decision_table.test.js" 2>&1)
 dt_rc=$?
