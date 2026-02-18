@@ -147,21 +147,23 @@ for task_dir in "${OUT_DIR}"/*/; do
     [ "$fields_ok" = "1" ] && check_pass "status.json has all 11 required fields"
 
     # Check P0 new fields: state_version, effective_max_attempts
+    # These are WARN (not FAIL) for pre-P0 tasks that lack them
     sv=$(json_get "$status_file" "state_version" "__MISSING__")
     if [ "$sv" = "__MISSING__" ] || [ "$sv" = "0" ] || [ "$sv" = "" ]; then
-      check_fail "status.json missing or zero state_version"
+      check_warn "status.json missing or zero state_version (pre-P0 task?)"
     else
       check_pass "status.json has state_version=${sv}"
     fi
 
     ema=$(json_get "$status_file" "effective_max_attempts" "__MISSING__")
     if [ "$ema" = "__MISSING__" ] || [ "$ema" = "" ]; then
-      check_fail "status.json missing effective_max_attempts"
+      check_warn "status.json missing effective_max_attempts (pre-P0 task?)"
     else
       check_pass "status.json has effective_max_attempts=${ema}"
     fi
 
     # Check _index/tasks/<task_id>.json exists (A1-6)
+    # WARN for pre-P0 tasks that lack it
     index_file="${OUT_DIR}/_index/tasks/${task_id}.json"
     if [ -f "$index_file" ]; then
       idx_tid=$(json_get "$index_file" "task_id" "")
@@ -171,7 +173,7 @@ for task_dir in "${OUT_DIR}"/*/; do
         check_fail "_index/tasks/${task_id}.json has wrong task_id='${idx_tid}'"
       fi
     else
-      check_fail "_index/tasks/${task_id}.json missing"
+      check_warn "_index/tasks/${task_id}.json missing (pre-P0 task?)"
     fi
   else
     check_fail "status.json does not exist at all"
