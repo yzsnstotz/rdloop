@@ -34,6 +34,12 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+// Decode JSON-style Unicode escapes (\uXXXX) so coder_output and evidence display correctly
+function decodeUnicodeEscapes(str) {
+  if (str == null || typeof str !== 'string') return '';
+  return str.replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+}
+
 // Badge helper (state display only — no user content)
 function badge(state) {
   const cls = {
@@ -49,7 +55,35 @@ async function api(path, opts) {
   return res.json();
 }
 
-// Hidden task IDs (frontend-only, so sidebar does not grow indefinitely)
+// K7-1: READ_ONLY from /api/health; disable write buttons and show banner
+let readOnlyMode = false;
+async function loadHealth() {
+  try {
+    const d = await api('/health');
+    readOnlyMode = d.read_only === true;
+  } catch { readOnlyMode = false; }
+  const banner = document.getElementById('read-only-banner');
+  if (readOnlyMode) {
+    if (!banner) {
+      const el = document.createElement('div');
+      el.id = 'read-only-banner';
+      el.style.cssText = 'padding:8px 16px;background:#d2992233;border-bottom:1px solid #d29922;color:#d29922;font-size:13px;text-align:center';
+      el.textContent = 'Read-only mode: writes are disabled.';
+      document.body.prepend(el);
+    }
+    document.querySelectorAll('.write-action').forEach(b => { b.disabled = true; });
+  } else {
+    if (banner) banner.remove();
+    document.querySelectorAll('.write-action').forEach(b => { b.disabled = false; });
+  }
+}
+
+// K7-1: Re-apply read-only disabled state to all .write-action buttons (call after dynamic content that adds write buttons)
+function updateReadOnlyBanner() {
+  document.querySelectorAll('.write-action').forEach(b => { b.disabled = readOnlyMode; });
+}
+
+// Permanently hidden task IDs (frontend). × removes from sidebar; no "Show all" to restore.
 function getHiddenTasks() {
   try {
     const raw = localStorage.getItem('rdloop_hiddenTasks');
@@ -59,22 +93,21 @@ function getHiddenTasks() {
 function setHiddenTasks(ids) {
   localStorage.setItem('rdloop_hiddenTasks', JSON.stringify(ids));
 }
-function hideTask(taskId, e) {
+async function hideTask(taskId, e) {
   if (e) e.stopPropagation();
+  try {
+    await fetch(`/api/tasks/${encodeURIComponent(taskId)}/record-hidden`, { method: 'POST' });
+  } catch (_) { /* best effort */ }
   const ids = getHiddenTasks();
   if (!ids.includes(taskId)) ids.push(taskId);
   setHiddenTasks(ids);
   loadTasks();
 }
-function clearHiddenTasks(e) {
-  if (e) e.stopPropagation();
-  setHiddenTasks([]);
-  loadTasks();
-}
 
 // Load task list (sidebar) — running tasks from out/; filter hidden
+// Request enough items so completed tasks are not pushed off by default limit (6)
 async function loadTasks() {
-  const data = await api('/tasks');
+  const data = await api('/tasks?limit=100');
   const list = document.getElementById('task-list');
   const allItems = data.items || data.tasks || [];
   const hidden = getHiddenTasks();
@@ -84,16 +117,13 @@ async function loadTasks() {
   if (items.length === 0) {
     let msg = 'No tasks found.<br>Run examples/run_hello.sh first.';
     if (allItems.length > 0) {
-      msg = `All ${allItems.length} task(s) hidden.`;
+      msg = `${allItems.length} task(s) in total; all have been removed from the list.`;
     }
-    list.innerHTML = `
-      <div style="padding:16px;color:#8b949e">${msg}</div>
-      ${hiddenCount > 0 ? `<div style="padding:0 16px 12px"><button type="button" class="btn" style="font-size:11px;padding:4px 8px" onclick="clearHiddenTasks()">Show all</button></div>` : ''}
-    `;
+    list.innerHTML = `<div style="padding:16px;color:#8b949e">${msg}</div>`;
     return;
   }
   list.innerHTML = `
-    ${hiddenCount > 0 ? `<div style="padding:8px 12px 4px;font-size:11px;color:#8b949e">${hiddenCount} hidden · <button type="button" class="btn" style="font-size:11px;padding:0 6px;vertical-align:middle" onclick="clearHiddenTasks()">Show all</button></div>` : ''}
+    ${hiddenCount > 0 ? `<div style="padding:8px 12px 4px;font-size:11px;color:#8b949e">${hiddenCount} removed from list</div>` : ''}
     ${items.map(t => `
     <div class="task-item ${t.task_id === currentTaskId ? 'active' : ''}"
          onclick="selectTask('${escapeHtml(t.task_id)}')">
@@ -105,14 +135,14 @@ async function loadTasks() {
             attempt ${escapeHtml(String(t.current_attempt || 0))} · ${escapeHtml(t.last_decision || '-')}
           </div>
         </div>
-        <button type="button" class="btn" style="flex-shrink:0;padding:2px 6px;font-size:12px;line-height:1;opacity:0.7" onclick="hideTask('${escapeHtml(t.task_id)}', event)" title="Hide from list">×</button>
+        <button type="button" class="btn write-action" style="flex-shrink:0;padding:2px 6px;font-size:12px;line-height:1;opacity:0.7" onclick="hideTask('${escapeHtml(t.task_id)}', event)" title="Hide from list">×</button>
       </div>
     </div>
   `).join('')}
   `;
 }
 
-// B1-2/B1-3/B1-4: Fetch log for a specific tab
+// B1-2/B1-3/B1-4: Fetch log for a specific tab (always latest content for live panel).
 async function fetchTabLog(taskId, logName, force) {
   const logContainer = document.getElementById('live-log-content');
   const lastRefreshed = document.getElementById('live-log-ts');
@@ -296,10 +326,11 @@ function renderTask(data) {
     ` : ''}
 
     <div class="controls">
-      <button class="btn btn-danger" onclick="doControl('PAUSE')">Pause</button>
-      <button class="btn btn-primary" onclick="doControl('RESUME')">Resume</button>
-      <button class="btn btn-primary" onclick="doRunNext()">Run Next</button>
-      <button class="btn btn-warn" onclick="doForceRun()">Force Run</button>
+      <button class="btn btn-danger write-action" ${(s.state !== 'RUNNING') ? 'disabled' : ''} onclick="doControl('PAUSE')" title="Takes effect at next checkpoint when coordinator is running">Pause</button>
+      <button class="btn btn-primary write-action" ${(s.state === 'RUNNING') ? 'disabled' : ''} onclick="doResume()" title="Resume and start coordinator">Resume</button>
+      <button class="btn btn-primary write-action" ${(s.state === 'RUNNING') ? 'disabled' : ''} onclick="doRunNext()" title="Set RUN_NEXT and start coordinator (when PAUSED)">Run Next</button>
+      <button class="btn btn-warn write-action" onclick="doForceRun()" title="Start coordinator ignoring lock (only if task is stuck)">Force Run</button>
+      <button class="btn write-action" onclick="openUserInputModal()" title="E5/E5-2: Insert user input (written to user_input.jsonl; coordinator consumes on next run)">Insert user input</button>
     </div>
 
     <!-- B1: Live Log Panel with tab persistence -->
@@ -311,6 +342,7 @@ function renderTask(data) {
           <button id="tab-judge" class="tab-btn${activeTab === 'judge' ? ' active' : ''}" onclick="switchTab('judge')">Judge</button>
         </div>
         <div class="live-panel-controls">
+          <button type="button" class="btn" style="font-size:11px;padding:2px 8px" onclick="if(currentTaskId){ fetchTabLog(currentTaskId, TAB_LOG_MAP[activeTab], true); }" title="Refresh current tab log">Refresh</button>
           <label style="font-size:12px;color:#8b949e;cursor:pointer">
             <input type="checkbox" id="autoscroll-toggle" ${autoScroll ? 'checked' : ''} onchange="toggleAutoScroll(this.checked)">
             AutoScroll
@@ -330,7 +362,7 @@ function renderTask(data) {
           <strong>${escapeHtml(a.name)}</strong>
           — test rc: ${escapeHtml(String(a.test_rc ?? '?'))}
           — judge: ${escapeHtml(a.judge_decision || '?')}
-          ${a.diff_stat ? `<br><small style="color:#8b949e">${escapeHtml(a.diff_stat.substring(0, 100))}</small>` : ''}
+          ${(task && (task.task_type === 'engineering_impl' || task.task_type === 'engineering_implementation') && a.diff_stat) ? `<br><small style="color:#8b949e">${escapeHtml(a.diff_stat.substring(0, 100))}</small>` : ''}
         </div>
       `).join('') || '<div style="color:#8b949e">No attempts yet</div>'}
     </div>
@@ -350,12 +382,15 @@ function renderTask(data) {
   `;
   content.className = '';
 
+  // K7-1: apply read-only state to write-action buttons in task panel
+  updateReadOnlyBanner();
+
   // Immediately load the active tab's log
   const logName = TAB_LOG_MAP[activeTab];
   if (logName) fetchTabLog(currentTaskId, logName, true);
 }
 
-// B3-2: Load attempt detail — uses fixed field set from API
+// B3-2: Load attempt detail — uses fixed field set from API. Live panel always shows latest attempt logs (not tied to selected attempt).
 async function loadAttempt(taskId, n) {
   currentAttempt = n;
   const data = await api(`/task/${taskId}/attempt/${n}`);
@@ -400,26 +435,35 @@ async function loadAttempt(taskId, n) {
         RC: ${escapeHtml(String(data.rc ?? '?'))} · Updated: ${escapeHtml(data.updated_at || '-')}
       </div>
 
-      <h3>Instruction</h3>
+      <h3>Coder input (instruction)</h3>
       <textarea id="instruction-edit">${escapeHtml(data.instruction || '(none)')}</textarea>
-      <button class="btn" onclick="saveInstruction(${escapeHtml(String(n))})" style="margin-top:8px">Save Instruction</button>
+      <button class="btn write-action" onclick="saveInstruction(${escapeHtml(String(n))})" style="margin-top:8px">Save Instruction</button>
 
+      <h3>Coder output</h3>
+      <pre class="attempt-block">${escapeHtml(decodeUnicodeEscapes(data.coder_output) || '(no coder output)')}</pre>
+
+      <h3>Judge input (prompt + evidence)</h3>
+      <p style="font-size:12px;color:#8b949e">Prompt given to judge:</p>
+      <pre class="attempt-block">${escapeHtml(data.judge_prompt_text || '(no prompt file)')}</pre>
+      <p style="font-size:12px;color:#8b949e;margin-top:8px">Evidence JSON appended to prompt:</p>
+      <pre class="attempt-block">${escapeHtml(data.evidence ? decodeUnicodeEscapes(JSON.stringify(data.evidence, null, 2)) : '(no evidence)')}</pre>
+
+      <h3>Judge output (verdict)</h3>
+      <pre class="attempt-block">${escapeHtml(data.verdict ? JSON.stringify(data.verdict, null, 2) : '(no verdict)')}</pre>
+
+      ${(data.task_type === 'engineering_impl' || data.task_type === 'engineering_implementation') ? `
       <h3>Test Result (rc: ${escapeHtml(String(data.test_rc || data.rc || '?'))})</h3>
-      <pre>${escapeHtml(data.test_log || '(no log)')}</pre>
+      <pre class="attempt-block">${escapeHtml(data.test_log || '(no log)')}</pre>
 
       <h3>Diff Stat</h3>
-      <pre>${escapeHtml(data.diff_stat || '(no diff)')}</pre>
-
-      <h3>Verdict</h3>
-      <pre>${escapeHtml(data.verdict ? JSON.stringify(data.verdict, null, 2) : '(no verdict)')}</pre>
+      <pre class="attempt-block">${escapeHtml(data.diff_stat || '(no diff)')}</pre>
+      ` : ''}
 
       <h3>Metrics</h3>
-      <pre>${escapeHtml(data.metrics ? JSON.stringify(data.metrics, null, 2) : '(no metrics)')}</pre>
-
-      <h3>Evidence</h3>
-      <pre>${escapeHtml(data.evidence ? JSON.stringify(data.evidence, null, 2) : '(no evidence)')}</pre>
+      <pre class="attempt-block">${escapeHtml(data.metrics ? JSON.stringify(data.metrics, null, 2) : '(no metrics)')}</pre>
     </div>
   `;
+  updateReadOnlyBanner();
 }
 
 // Control actions — B1-1: use refreshCurrentTaskMeta instead of selectTask to preserve tab
@@ -434,15 +478,42 @@ async function doControl(action, payload) {
   setTimeout(refreshCurrentTaskMeta, 500);
 }
 
+// Run Next: set RUN_NEXT (so --continue will advance from PAUSED) then start coordinator
 async function doRunNext() {
   if (!currentTaskId) return;
   await doControl('RUN_NEXT');
-  await api(`/task/${currentTaskId}/run`, { method: 'POST' });
+  const result = await api(`/task/${currentTaskId}/run`, { method: 'POST' }).catch(e => ({ error: e?.message || String(e) }));
+  if (result && result.error) {
+    if (String(result.error).includes('already running') || String(result.hint || '').includes('lock')) {
+      alert('Task is already running. Pause first if you want to stop it.');
+      return;
+    }
+    alert(result.error);
+    return;
+  }
   setTimeout(refreshCurrentTaskMeta, 1000);
 }
 
+// Resume: set RESUME then start coordinator (one click = resume + run)
+async function doResume() {
+  if (!currentTaskId) return;
+  await doControl('RESUME');
+  const result = await api(`/task/${currentTaskId}/run`, { method: 'POST' }).catch(e => ({ error: e?.message || String(e) }));
+  if (result && result.error) {
+    if (String(result.error).includes('already running') || String(result.hint || '').includes('lock')) {
+      alert('Task is already running.');
+      return;
+    }
+    alert(result.error);
+    return;
+  }
+  setTimeout(refreshCurrentTaskMeta, 1000);
+}
+
+// Force Run: start coordinator ignoring lock (use only when task is stuck)
 async function doForceRun() {
   if (!currentTaskId) return;
+  if (!confirm('Force Run ignores the running lock. Use only if the task is stuck. Continue?')) return;
   await api(`/task/${currentTaskId}/run?force=1`, { method: 'POST' });
   setTimeout(refreshCurrentTaskMeta, 1000);
 }
@@ -453,6 +524,65 @@ async function saveInstruction(n) {
   await doControl('EDIT_INSTRUCTION', { attempt: n, instruction_text: text });
 }
 
+// E5/E5-2: GUI "Insert user input" window — writes to user_input.jsonl (fixed schema); coordinator consumes and writes last_user_input_ts_consumed
+function openUserInputModal() {
+  if (!currentTaskId) return;
+  const old = document.getElementById('user-input-modal');
+  if (old) old.remove();
+  const requestId = 'gui-' + Date.now() + '-' + Math.random().toString(36).slice(2, 10);
+  const modalHtml = `
+    <div id="user-input-modal" class="modal-overlay" onclick="if(event.target===this)closeUserInputModal()">
+      <div class="modal-box" style="max-width:520px">
+        <h3 style="margin-top:0">Insert user input</h3>
+        <p style="font-size:12px;color:#8b949e;margin-bottom:12px">Text will be appended to <code>user_input.jsonl</code>. Coordinator consumes it on the next run and writes <code>last_user_input_ts_consumed</code>.</p>
+        <label class="form-label">Your input (text)</label>
+        <textarea id="user-input-text" class="form-input" rows="4" placeholder="Answer or instruction for the task..."></textarea>
+        <div id="user-input-msg" style="font-size:12px;margin-top:8px;color:#f85149"></div>
+        <div style="margin-top:12px;display:flex;gap:8px">
+          <button class="btn btn-primary write-action" onclick="submitUserInput()">Submit</button>
+          <button class="btn" onclick="closeUserInputModal()">Cancel</button>
+        </div>
+      </div>
+    </div>`;
+  document.body.insertAdjacentHTML('beforeend', modalHtml);
+  updateReadOnlyBanner();
+  document.getElementById('user-input-text').focus();
+}
+
+function closeUserInputModal() {
+  const modal = document.getElementById('user-input-modal');
+  if (modal) modal.remove();
+}
+
+async function submitUserInput() {
+  if (!currentTaskId) return;
+  const textEl = document.getElementById('user-input-text');
+  const msgEl = document.getElementById('user-input-msg');
+  const text = (textEl && textEl.value || '').trim();
+  if (!text) {
+    if (msgEl) msgEl.textContent = 'Please enter some text.';
+    return;
+  }
+  if (msgEl) msgEl.textContent = '';
+  const requestId = 'gui-' + Date.now() + '-' + Math.random().toString(36).slice(2, 10);
+  try {
+    const res = await fetch(`/api/tasks/${encodeURIComponent(currentTaskId)}/user_input`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, request_id: requestId })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      if (msgEl) msgEl.textContent = data.error || 'Request failed';
+      return;
+    }
+    closeUserInputModal();
+    refreshCurrentTaskMeta();
+  } catch (e) {
+    if (msgEl) msgEl.textContent = e.message || 'Request failed';
+  }
+}
+
 // ================================================================
 // A2: Task Spec CRUD — list, new, edit, copy, delete
 // A4: task_type + rubric_thresholds
@@ -460,6 +590,9 @@ async function saveInstruction(n) {
 // ================================================================
 
 let cachedAdapters = null;
+let cachedCliapiProviders = {};
+// C1-1: when false, PARTIAL adapters must not be selectable as default or for Run
+let cachedAllowPartialRun = false;
 let cachedRubric = {};
 
 // A1-2: Selected spec for detail view (task_id or null)
@@ -488,16 +621,17 @@ async function loadTaskSpecs() {
           </div>
         </div>
         <div style="display:flex;gap:4px" onclick="event.stopPropagation()">
-          <button class="btn" style="padding:3px 8px;font-size:11px"
+          <button class="btn write-action" style="padding:3px 8px;font-size:11px"
             onclick="openEditSpecModal('${escapeHtml(s.task_id)}')">Edit</button>
-          <button class="btn" style="padding:3px 8px;font-size:11px"
+          <button class="btn write-action" style="padding:3px 8px;font-size:11px"
             onclick="copySpec('${escapeHtml(s.task_id)}')">Copy</button>
-          <button class="btn btn-danger" style="padding:3px 8px;font-size:11px"
+          <button class="btn btn-danger write-action" style="padding:3px 8px;font-size:11px"
             onclick="deleteSpec('${escapeHtml(s.task_id)}')">Del</button>
         </div>
       </div>
     </div>
   `).join('');
+  updateReadOnlyBanner();
 }
 
 // A1-3: Show task spec detail in main content (full JSON + key fields + Run task)
@@ -509,7 +643,7 @@ async function showSpecDetail(taskId) {
   try {
     const data = await api(`/task_specs/${encodeURIComponent(taskId)}`);
     const spec = data.spec || {};
-    const keys = ['task_id', 'goal', 'task_type', 'scoring_mode', 'rubric_thresholds', 'coder', 'judge'];
+    const keys = ['task_id', 'goal', 'task_type', 'scoring_mode', 'rubric_thresholds', 'coder', 'judge', 'coder_model', 'judge_model'];
     const keyFields = keys.map(k => {
       const v = spec[k];
       const str = v === undefined || v === null ? '' : (typeof v === 'object' ? JSON.stringify(v) : String(v));
@@ -552,13 +686,21 @@ async function runTaskFromSpec(taskId) {
   }
 }
 
-// A5: Load adapters and cache; A6: apply saved defaults when present
+// A5: Load adapters and cliapi providers; A6: apply saved defaults when present
 async function loadAdapters() {
   try {
     const data = await api('/adapters');
     cachedAdapters = data.adapters || [];
+    cachedAllowPartialRun = data.allow_partial_run === true;
   } catch {
     cachedAdapters = [];
+    cachedAllowPartialRun = false;
+  }
+  try {
+    const cliapi = await api('/cliapi-providers');
+    cachedCliapiProviders = cliapi.providers || {};
+  } catch {
+    cachedCliapiProviders = {};
   }
 }
 
@@ -566,13 +708,22 @@ async function loadAdapters() {
 async function saveAdaptersAsDefault() {
   const coderEl = document.getElementById('adapter-coder');
   const judgeEl = document.getElementById('adapter-judge');
+  const coderModelEl = document.getElementById('adapter-coder-model');
+  const judgeModelEl = document.getElementById('adapter-judge-model');
   const default_coder = coderEl ? coderEl.value : null;
   const default_judge = judgeEl ? judgeEl.value : null;
+  const default_coder_model = coderModelEl && coderModelEl.value ? coderModelEl.value : null;
+  const default_judge_model = judgeModelEl && judgeModelEl.value ? judgeModelEl.value : null;
   try {
     const res = await fetch('/api/config', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ default_coder: default_coder || null, default_judge: default_judge || null })
+      body: JSON.stringify({
+        default_coder: default_coder || null,
+        default_judge: default_judge || null,
+        default_coder_model: default_coder_model || null,
+        default_judge_model: default_judge_model || null
+      })
     });
     const data = await res.json();
     if (!res.ok) {
@@ -601,11 +752,16 @@ async function loadRubric(taskType) {
   }
 }
 
-// A5: Build adapter selector HTML
-function buildAdapterSelector(role, selectedName) {
-  const adapters = (cachedAdapters || []).filter(a => a.type === role);
+// A5: Build adapter (provider) selector HTML — single dropdown. Only show cliapi providers (no mock, no direct-CLI-only).
+// C1-1: when !cachedAllowPartialRun, exclude PARTIAL adapters from default and Run selection.
+function buildAdapterSelectorOnly(role, selectedName) {
+  const cliapiNames = Object.keys(cachedCliapiProviders || {});
+  let adapters = (cachedAdapters || []).filter(a => a.type === role && cliapiNames.includes(a.name));
+  if (!cachedAllowPartialRun) {
+    adapters = adapters.filter(a => a.support_level !== 'PARTIAL');
+  }
   if (adapters.length === 0) {
-    return `<select id="adapter-${role}" class="form-select"><option value="">Loading...</option></select>`;
+    return `<select id="adapter-${role}" class="form-select" onchange="refreshModelSelector('${role}')"><option value="">Loading...</option></select>`;
   }
   const options = adapters.map(a => {
     const disabled = a.status !== 'OK' ? 'disabled' : '';
@@ -613,7 +769,52 @@ function buildAdapterSelector(role, selectedName) {
     const sel = a.name === selectedName ? 'selected' : '';
     return `<option value="${escapeHtml(a.name)}" ${disabled} ${sel}>${escapeHtml(label)}</option>`;
   }).join('');
-  return `<select id="adapter-${role}" class="form-select">${options}</select>`;
+  return `<select id="adapter-${role}" class="form-select" onchange="refreshModelSelector('${role}')">${options}</select>`;
+}
+
+// Cliapi: provider + optional model (second-level) selector. selectedModel = model id or ''
+function buildAdapterSelector(role, selectedProvider, selectedModel) {
+  const providerHtml = buildAdapterSelectorOnly(role, selectedProvider || '');
+  const models = (cachedCliapiProviders[selectedProvider] && cachedCliapiProviders[selectedProvider].models) || [];
+  const showModel = models.length > 0;
+  let modelOptions = '<option value="">— default —</option>';
+  if (showModel) {
+    modelOptions = models.map(m => {
+      const sel = (selectedModel && m.id === selectedModel) ? 'selected' : '';
+      return `<option value="${escapeHtml(m.id)}" ${sel}>${escapeHtml(m.alias || m.id)}</option>`;
+    }).join('');
+  }
+  const modelWrapStyle = showModel ? '' : 'display:none';
+  return `
+    <div class="adapter-row-${role}" style="display:flex;flex-direction:column;gap:6px">
+      ${providerHtml}
+      <div id="${role}-model-wrap" class="model-wrap" style="${modelWrapStyle};margin-top:4px">
+        <label class="form-label" style="font-size:11px;color:#8b949e">Model (cliapi)</label>
+        <select id="adapter-${role}-model" class="form-select" style="font-size:12px">${modelOptions}</select>
+      </div>
+    </div>`;
+}
+
+// When provider changes: show/hide model dropdown and repopulate options
+function refreshModelSelector(role) {
+  const provEl = document.getElementById(`adapter-${role}`);
+  const wrapEl = document.getElementById(`${role}-model-wrap`);
+  const modelEl = document.getElementById(`adapter-${role}-model`);
+  if (!provEl || !wrapEl || !modelEl) return;
+  const provider = provEl.value || '';
+  const models = (cachedCliapiProviders[provider] && cachedCliapiProviders[provider].models) || [];
+  if (models.length === 0) {
+    wrapEl.style.display = 'none';
+    modelEl.innerHTML = '<option value="">— default —</option>';
+    return;
+  }
+  wrapEl.style.display = 'block';
+  const currentVal = modelEl.value;
+  modelEl.innerHTML = models.map(m => {
+    const sel = m.id === currentVal ? 'selected' : (!currentVal && models[0] ? (m === models[0] ? 'selected' : '') : '');
+    return `<option value="${escapeHtml(m.id)}" ${sel}>${escapeHtml(m.alias || m.id)}</option>`;
+  }).join('');
+  if (!currentVal && models[0]) modelEl.value = models[0].id;
 }
 
 // A4: Build rubric thresholds UI
@@ -709,10 +910,14 @@ async function openNewSpecModal() {
   await loadAdapters();
   let defaultCoder = null;
   let defaultJudge = null;
+  let defaultCoderModel = null;
+  let defaultJudgeModel = null;
   try {
     const cfg = await api('/config');
     defaultCoder = cfg.default_coder || null;
     defaultJudge = cfg.default_judge || null;
+    defaultCoderModel = cfg.default_coder_model || null;
+    defaultJudgeModel = cfg.default_judge_model || null;
   } catch {}
 
   const TEMPLATES = {
@@ -812,15 +1017,35 @@ async function openNewSpecModal() {
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
           <div>
             <label class="form-label">Coder Adapter (A5)</label>
-            <div id="coder-adapter-selector">${buildAdapterSelector('coder', defaultCoder)}</div>
+            <div id="coder-adapter-selector">${buildAdapterSelector('coder', defaultCoder, defaultCoderModel)}</div>
           </div>
           <div>
             <label class="form-label">Judge Adapter (A5)</label>
-            <div id="judge-adapter-selector">${buildAdapterSelector('judge', defaultJudge)}</div>
+            <div id="judge-adapter-selector">${buildAdapterSelector('judge', defaultJudge, defaultJudgeModel)}</div>
           </div>
         </div>
         <div style="margin-bottom:12px">
-          <button type="button" class="btn" style="font-size:12px" onclick="saveAdaptersAsDefault()">Save as Default (A6)</button>
+          <button type="button" class="btn write-action" style="font-size:12px" onclick="saveAdaptersAsDefault()">Save as Default (A6)</button>
+        </div>
+
+        <div class="form-section" style="margin-bottom:12px;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
+          <strong class="form-label">Repo &amp; Git</strong>
+          <div style="margin-top:8px">
+            <label class="form-label" style="font-size:11px">repo_path (absolute path to git repo)</label>
+            <input type="text" id="modal-repo-path" class="form-input" placeholder="/path/to/repo" style="margin-bottom:6px">
+          </div>
+          <div style="margin-top:6px">
+            <label class="form-label" style="font-size:11px">base_ref (branch or ref)</label>
+            <input type="text" id="modal-base-ref" class="form-input" placeholder="main" style="margin-bottom:6px">
+          </div>
+          <div style="margin-top:6px">
+            <label class="form-label" style="font-size:11px">allowed_paths (JSON array, optional)</label>
+            <input type="text" id="modal-allowed-paths" class="form-input" placeholder='[] or ["src/"]' style="font-family:monospace;font-size:11px">
+          </div>
+          <div style="margin-top:6px">
+            <label class="form-label" style="font-size:11px">forbidden_globs (JSON array, optional)</label>
+            <input type="text" id="modal-forbidden-globs" class="form-input" placeholder='["**/.env"]' style="font-family:monospace;font-size:11px">
+          </div>
         </div>
 
         <div id="rubric-thresholds-container" style="margin-bottom:12px"></div>
@@ -833,13 +1058,14 @@ async function openNewSpecModal() {
 
         <div style="display:flex;gap:8px;justify-content:flex-end">
           <button class="btn" onclick="closeModal()">Cancel</button>
-          <button class="btn btn-primary" onclick="saveNewSpec()">Save</button>
+          <button class="btn btn-primary write-action" onclick="saveNewSpec()">Save</button>
         </div>
       </div>
     </div>
   `;
 
   document.body.insertAdjacentHTML('beforeend', modalHtml);
+  updateReadOnlyBanner();
 
   // Store templates for use in applyTemplate
   window._specTemplates = TEMPLATES;
@@ -858,13 +1084,28 @@ function applyTemplate() {
   // Update task-type selector
   const typeEl = document.getElementById('modal-task-type');
   if (typeEl && tpl.task_type) typeEl.value = tpl.task_type;
-  // Update adapter selectors
+  // Update adapter and model selectors
   const coderEl = document.getElementById('adapter-coder');
   if (coderEl && tpl.coder) coderEl.value = tpl.coder;
   const judgeEl = document.getElementById('adapter-judge');
   if (judgeEl && tpl.judge) judgeEl.value = tpl.judge;
+  refreshModelSelector('coder');
+  refreshModelSelector('judge');
+  const coderModelEl = document.getElementById('adapter-coder-model');
+  if (coderModelEl && tpl.coder_model) coderModelEl.value = tpl.coder_model;
+  const judgeModelEl = document.getElementById('adapter-judge-model');
+  if (judgeModelEl && tpl.judge_model) judgeModelEl.value = tpl.judge_model;
   // Put JSON in editor
   document.getElementById('modal-spec-json').value = JSON.stringify(tpl, null, 2);
+  // Repo & Git fields
+  const rp = document.getElementById('modal-repo-path');
+  if (rp) rp.value = tpl.repo_path || '';
+  const br = document.getElementById('modal-base-ref');
+  if (br) br.value = tpl.base_ref || 'main';
+  const ap = document.getElementById('modal-allowed-paths');
+  if (ap) ap.value = Array.isArray(tpl.allowed_paths) ? JSON.stringify(tpl.allowed_paths) : (tpl.allowed_paths || '[]');
+  const fg = document.getElementById('modal-forbidden-globs');
+  if (fg) fg.value = Array.isArray(tpl.forbidden_globs) ? JSON.stringify(tpl.forbidden_globs) : (tpl.forbidden_globs || '[]');
   // Load rubric
   if (tpl.task_type) onTaskTypeChange();
 }
@@ -895,19 +1136,31 @@ async function saveNewSpec() {
     const taskType = document.getElementById('modal-task-type')?.value || undefined;
     const coder = document.getElementById('adapter-coder')?.value || 'mock';
     const judge = document.getElementById('adapter-judge')?.value || 'mock';
+    const coderModel = document.getElementById('adapter-coder-model')?.value?.trim();
+    const judgeModel = document.getElementById('adapter-judge-model')?.value?.trim();
     spec = {
       schema_version: 'v1',
       task_id: taskId,
       task_type: taskType || undefined,
+      repo_path: document.getElementById('modal-repo-path')?.value?.trim() || undefined,
+      base_ref: document.getElementById('modal-base-ref')?.value?.trim() || 'main',
       coder,
       judge,
+      ...(coderModel ? { coder_model: coderModel } : {}),
+      ...(judgeModel ? { judge_model: judgeModel } : {}),
       goal: '',
       acceptance: '',
       test_cmd: 'true',
       max_attempts: 3,
       constraints: [],
+      allowed_paths: [],
+      forbidden_globs: ['**/.env', '**/secrets*', '**/*.pem'],
       created_at: new Date().toISOString()
     };
+    const apRaw0 = document.getElementById('modal-allowed-paths')?.value?.trim();
+    if (apRaw0) { try { spec.allowed_paths = JSON.parse(apRaw0); } catch {} }
+    const fgRaw0 = document.getElementById('modal-forbidden-globs')?.value?.trim();
+    if (fgRaw0) { try { spec.forbidden_globs = JSON.parse(fgRaw0); } catch {} }
     // A4: read thresholds
     if (taskType) {
       const thresholds = readThresholdsFromUI(taskType);
@@ -915,14 +1168,27 @@ async function saveNewSpec() {
     }
   }
 
-  // Override task_id and adapter from form controls if JSON was provided
+  // Override task_id, adapter, and model from form controls if JSON was provided
   spec.task_id = taskId;
   const coderVal = document.getElementById('adapter-coder')?.value;
   if (coderVal) spec.coder = coderVal;
   const judgeVal = document.getElementById('adapter-judge')?.value;
   if (judgeVal) spec.judge = judgeVal;
+  const coderModelVal = document.getElementById('adapter-coder-model')?.value;
+  if (coderModelVal) spec.coder_model = coderModelVal; else if (spec.coder_model !== undefined) delete spec.coder_model;
+  const judgeModelVal = document.getElementById('adapter-judge-model')?.value;
+  if (judgeModelVal) spec.judge_model = judgeModelVal; else if (spec.judge_model !== undefined) delete spec.judge_model;
   const taskTypeVal = document.getElementById('modal-task-type')?.value;
   if (taskTypeVal) spec.task_type = taskTypeVal;
+  // Repo & Git from form
+  const rp = document.getElementById('modal-repo-path')?.value?.trim();
+  if (rp !== undefined && rp !== '') spec.repo_path = rp;
+  const br = document.getElementById('modal-base-ref')?.value?.trim();
+  if (br !== undefined && br !== '') spec.base_ref = br;
+  const apRaw = document.getElementById('modal-allowed-paths')?.value?.trim();
+  if (apRaw) { try { spec.allowed_paths = JSON.parse(apRaw); } catch {} }
+  const fgRaw = document.getElementById('modal-forbidden-globs')?.value?.trim();
+  if (fgRaw) { try { spec.forbidden_globs = JSON.parse(fgRaw); } catch {} }
   // A4: merge thresholds
   if (spec.task_type) {
     const thresholds = readThresholdsFromUI(spec.task_type);
@@ -988,15 +1254,35 @@ async function openEditSpecModal(taskId) {
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
           <div>
             <label class="form-label">Coder Adapter (A5)</label>
-            <div id="coder-adapter-selector">${buildAdapterSelector('coder', spec.coder)}</div>
+            <div id="coder-adapter-selector">${buildAdapterSelector('coder', spec.coder, spec.coder_model)}</div>
           </div>
           <div>
             <label class="form-label">Judge Adapter (A5)</label>
-            <div id="judge-adapter-selector">${buildAdapterSelector('judge', spec.judge)}</div>
+            <div id="judge-adapter-selector">${buildAdapterSelector('judge', spec.judge, spec.judge_model)}</div>
           </div>
         </div>
         <div style="margin-bottom:12px">
-          <button type="button" class="btn" style="font-size:12px" onclick="saveAdaptersAsDefault()">Save as Default (A6)</button>
+          <button type="button" class="btn write-action" style="font-size:12px" onclick="saveAdaptersAsDefault()">Save as Default (A6)</button>
+        </div>
+
+        <div class="form-section" style="margin-bottom:12px;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px">
+          <strong class="form-label">Repo &amp; Git</strong>
+          <div style="margin-top:8px">
+            <label class="form-label" style="font-size:11px">repo_path</label>
+            <input type="text" id="modal-repo-path" class="form-input" value="${escapeHtml(spec.repo_path || '')}" placeholder="/path/to/repo" style="margin-bottom:6px">
+          </div>
+          <div style="margin-top:6px">
+            <label class="form-label" style="font-size:11px">base_ref</label>
+            <input type="text" id="modal-base-ref" class="form-input" value="${escapeHtml(spec.base_ref || 'main')}" placeholder="main" style="margin-bottom:6px">
+          </div>
+          <div style="margin-top:6px">
+            <label class="form-label" style="font-size:11px">allowed_paths (JSON array)</label>
+            <input type="text" id="modal-allowed-paths" class="form-input" value="${escapeHtml(Array.isArray(spec.allowed_paths) ? JSON.stringify(spec.allowed_paths) : (spec.allowed_paths || '[]'))}" placeholder='[]' style="font-family:monospace;font-size:11px">
+          </div>
+          <div style="margin-top:6px">
+            <label class="form-label" style="font-size:11px">forbidden_globs (JSON array)</label>
+            <input type="text" id="modal-forbidden-globs" class="form-input" value="${escapeHtml(Array.isArray(spec.forbidden_globs) ? JSON.stringify(spec.forbidden_globs) : (spec.forbidden_globs || '[]'))}" placeholder='["**/.env"]' style="font-family:monospace;font-size:11px">
+          </div>
         </div>
 
         <div id="rubric-thresholds-container" style="margin-bottom:12px">
@@ -1009,15 +1295,17 @@ async function openEditSpecModal(taskId) {
           <div id="modal-json-error" style="color:#f85149;font-size:12px;margin-top:4px"></div>
         </div>
 
-        <div style="display:flex;gap:8px;justify-content:flex-end">
+        <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
+          ${spec.task_type ? `<button class="btn write-action" style="margin-right:auto;font-size:12px" onclick="openPromptForTaskType('${escapeHtml(spec.task_type)}')">Edit judge.prompt.${escapeHtml(spec.task_type)}.md</button>` : ''}
           <button class="btn" onclick="closeModal()">Cancel</button>
-          <button class="btn btn-primary" onclick="saveEditSpec('${escapeHtml(taskId)}')">Save</button>
+          <button class="btn btn-primary write-action" onclick="saveEditSpec('${escapeHtml(taskId)}')">Save</button>
         </div>
       </div>
     </div>
   `;
 
   document.body.insertAdjacentHTML('beforeend', modalHtml);
+  updateReadOnlyBanner();
 }
 
 // A2-5: Save edited spec
@@ -1035,14 +1323,28 @@ async function saveEditSpec(taskId) {
     return;
   }
 
-  // Override fields from form controls
+  // Override fields from form controls (adapter + model same as saveNewSpec)
   const coderVal = document.getElementById('adapter-coder')?.value;
   if (coderVal) spec.coder = coderVal;
   const judgeVal = document.getElementById('adapter-judge')?.value;
   if (judgeVal) spec.judge = judgeVal;
+  const coderModelVal = document.getElementById('adapter-coder-model')?.value;
+  if (coderModelVal) spec.coder_model = coderModelVal; else if (spec.coder_model !== undefined) delete spec.coder_model;
+  const judgeModelVal = document.getElementById('adapter-judge-model')?.value;
+  if (judgeModelVal) spec.judge_model = judgeModelVal; else if (spec.judge_model !== undefined) delete spec.judge_model;
   const taskTypeVal = document.getElementById('modal-task-type')?.value;
   if (taskTypeVal) spec.task_type = taskTypeVal;
   spec.task_id = taskId;
+
+  // Repo & Git from form
+  const rp = document.getElementById('modal-repo-path')?.value?.trim();
+  if (rp !== undefined && rp !== '') spec.repo_path = rp;
+  const br = document.getElementById('modal-base-ref')?.value?.trim();
+  if (br !== undefined && br !== '') spec.base_ref = br;
+  const apRaw = document.getElementById('modal-allowed-paths')?.value?.trim();
+  if (apRaw) { try { spec.allowed_paths = JSON.parse(apRaw); } catch {} }
+  const fgRaw = document.getElementById('modal-forbidden-globs')?.value?.trim();
+  if (fgRaw) { try { spec.forbidden_globs = JSON.parse(fgRaw); } catch {} }
 
   // A4: merge thresholds from UI
   if (spec.task_type) {
@@ -1107,6 +1409,121 @@ async function deleteSpec(taskId) {
 }
 
 // ================================================================
+// D1/D2: Prompt management
+// ================================================================
+
+// D1: Load and display prompts list in sidebar
+async function loadPrompts() {
+  const list = document.getElementById('prompts-list');
+  if (!list) return;
+  try {
+    const res = await fetch('/api/prompts');
+    const data = await res.json();
+    if (data.error) { list.innerHTML = `<div style="padding:6px 12px;font-size:12px;color:#f85149">${escapeHtml(data.error)}</div>`; return; }
+    if (!Array.isArray(data) || data.length === 0) {
+      list.innerHTML = '<div style="padding:6px 12px;font-size:12px;color:#8b949e">No prompts found</div>';
+      return;
+    }
+    list.innerHTML = data.map(p => `
+      <div class="sidebar-item" onclick="viewPrompt(${JSON.stringify(escapeHtml(p.name))})" style="cursor:pointer">
+        <span style="flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${escapeHtml(p.name)}">${escapeHtml(p.name)}</span>
+        <span style="font-size:10px;color:#8b949e;margin-left:4px">${escapeHtml(String(Math.round((p.size||0)/1024*10)/10))}KB</span>
+      </div>`).join('');
+  } catch (e) {
+    list.innerHTML = `<div style="padding:6px 12px;font-size:12px;color:#f85149">Load error: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+// D2: View and edit a prompt in a modal
+async function viewPrompt(name) {
+  // Remove existing modal if any
+  const old = document.getElementById('prompt-modal');
+  if (old) old.remove();
+  try {
+    const res = await fetch(`/api/prompts/${encodeURIComponent(name)}`);
+    const data = await res.json();
+    if (data.error) { alert('Failed to load prompt: ' + data.error); return; }
+    const modalHtml = `
+      <div id="prompt-modal" class="modal-overlay" onclick="if(event.target===this)closePromptModal()">
+        <div class="modal-box" style="max-width:800px;max-height:90vh;overflow-y:auto">
+          <h3 style="margin-top:0">Edit Prompt: ${escapeHtml(name)}</h3>
+          <textarea id="prompt-editor" class="code-editor" style="height:480px;font-family:monospace;font-size:12px;width:100%;box-sizing:border-box">${escapeHtml(data.content || '')}</textarea>
+          <div id="prompt-save-notice" style="font-size:12px;color:#3fb950;margin-top:4px;min-height:16px"></div>
+          <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
+            <button class="btn" onclick="closePromptModal()">Cancel</button>
+            <button class="btn btn-primary write-action" onclick="savePrompt(${JSON.stringify(escapeHtml(name))})">Save</button>
+          </div>
+        </div>
+      </div>`;
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+    updateReadOnlyBanner();
+  } catch (e) {
+    alert('Failed to load prompt: ' + e.message);
+  }
+}
+
+function closePromptModal() {
+  const el = document.getElementById('prompt-modal');
+  if (el) el.remove();
+}
+
+// D2: Save prompt content via PUT. K7-2: overwrite requires second confirmation.
+async function savePrompt(name) {
+  const content = document.getElementById('prompt-editor')?.value;
+  if (content === undefined) return;
+  if (!confirm('Overwrite this prompt file? This action will be recorded in the audit log.')) return;
+  const notice = document.getElementById('prompt-save-notice');
+  if (notice) notice.textContent = '';
+  try {
+    const res = await fetch(`/api/prompts/${encodeURIComponent(name)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content })
+    });
+    const result = await res.json();
+    if (!res.ok) {
+      if (notice) notice.style.color = '#f85149';
+      if (notice) notice.textContent = 'Save failed: ' + (result.error || res.statusText);
+      return;
+    }
+    if (notice) { notice.style.color = '#3fb950'; notice.textContent = 'Saved.'; }
+    loadPrompts();
+    setTimeout(() => { if (notice) notice.textContent = ''; }, 3000);
+  } catch (e) {
+    if (notice) { notice.style.color = '#f85149'; notice.textContent = 'Save error: ' + e.message; }
+  }
+}
+
+// D2: Open prompt for the task_type of a spec (from edit modal)
+async function openPromptForTaskType(taskType) {
+  if (!taskType) { alert('No task_type selected'); return; }
+  const name = `judge.prompt.${taskType}.md`;
+  await viewPrompt(name);
+}
+
+// Sidebar: add Prompts section
+function renderPromptsSection() {
+  const sidebar = document.getElementById('sidebar');
+  if (!sidebar) return;
+  if (document.getElementById('prompts-section')) return;
+
+  const section = document.createElement('div');
+  section.id = 'prompts-section';
+  section.innerHTML = `
+    <div style="padding:12px 12px 4px;display:flex;justify-content:space-between;align-items:center">
+      <div style="font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:0.5px">Prompts</div>
+      <button class="btn" style="padding:2px 8px;font-size:11px" onclick="loadPrompts()">↺</button>
+    </div>
+    <div id="prompts-list" style="max-height:180px;overflow-y:auto;border-bottom:1px solid #30363d"></div>
+    <div style="padding:4px 12px 12px;font-size:11px;color:#8b949e;font-style:italic">
+      From prompts/
+    </div>
+  `;
+  sidebar.appendChild(section);
+  loadPrompts();
+}
+
+// ================================================================
 // Sidebar: add Task Specs section
 // ================================================================
 function renderSpecsSection() {
@@ -1121,7 +1538,7 @@ function renderSpecsSection() {
   section.innerHTML = `
     <div style="padding:12px 12px 4px;display:flex;justify-content:space-between;align-items:center">
       <div style="font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:0.5px">Task Specs</div>
-      <button class="btn" style="padding:2px 8px;font-size:11px" onclick="openNewSpecModal()">+ New</button>
+      <button class="btn write-action" style="padding:2px 8px;font-size:11px" onclick="openNewSpecModal()">+ New</button>
     </div>
     <div id="task-specs-notice" style="padding:0 12px;font-size:11px;color:#58a6ff;min-height:14px"></div>
     <div id="task-specs-list" style="max-height:220px;overflow-y:auto;border-bottom:1px solid #30363d"></div>
@@ -1147,6 +1564,5 @@ setInterval(refreshLiveLog, 3000);
 // Refresh task meta periodically (separate from log refresh)
 setInterval(refreshCurrentTaskMeta, 5000);
 
-// Initial load
-loadTasks();
-renderSpecsSection();
+// Initial load (K7-1: load health for read_only first so banner and button state are correct)
+loadHealth().then(() => { loadTasks(); renderSpecsSection(); renderPromptsSection(); updateReadOnlyBanner(); });

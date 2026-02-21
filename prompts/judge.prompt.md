@@ -6,6 +6,7 @@ You are an automated code review judge. Your job is to evaluate whether a code c
 
 You will receive an **EvidenceBundle** JSON containing:
 - `task_id`, `attempt`, `worktree_path`
+- `coder_output`: (when present) the coder agent's full run output for this attempt — use this as the primary artifact to evaluate
 - `git`: diff stats, patch path, head commit
 - `commands`: list of commands run with return codes and timing
 - `test`: test command, return code, and log tail (stdout+stderr merged)

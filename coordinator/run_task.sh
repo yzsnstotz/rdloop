@@ -48,7 +48,7 @@ CONSECUTIVE_TIMEOUT_KEY=""
 get_pause_category() {
   local code="$1"
   case "$code" in
-    PAUSED_CURSOR_MISSING|PAUSED_CODEX_MISSING|PAUSED_CRASH|PAUSED_NOT_GIT_REPO|PAUSED_TASK_ID_CONFLICT)
+    PAUSED_CODEX_MISSING|PAUSED_CRASH|PAUSED_NOT_GIT_REPO|PAUSED_TASK_ID_CONFLICT|PAUSED_CODER_FAILED|PAUSED_CODER_NO_OUTPUT)
       echo "PAUSED_INFRA" ;;
     PAUSED_CODER_AUTH_195|PAUSED_JUDGE_AUTH_195)
       echo "PAUSED_INFRA" ;;
@@ -84,6 +84,7 @@ try:
   for k in keys: v=v[k]
   if isinstance(v,list): print(json.dumps(v))
   elif isinstance(v,bool): print('true' if v else 'false')
+  elif v is None: print(sys.argv[3] if len(sys.argv)>3 else '')
   else: print(v)
 except: print(sys.argv[3] if len(sys.argv)>3 else '')
 " "$file" "$field" "$default" 2>/dev/null
@@ -152,8 +153,9 @@ print(json.dumps(d))
   write_index_entry "$state"
 }
 
+# K1-1b: state (enum) + decision (PASS|FAIL|NEED_USER_INPUT), verdict_summary optional
 write_final_summary() {
-  local decision="$1" last_dec="$2" cur_att="$3" max_att="$4"
+  local state="$1" last_dec="$2" cur_att="$3" max_att="$4"
   local msg="$5" q_json="$6" pcat="$7" prcode="$8" head_c="$9"
   shift 9
   local score="${1:-null}" verdict_summary="${2:-}"
@@ -161,17 +163,18 @@ write_final_summary() {
 import json,sys
 score_raw=sys.argv[11]
 score=int(score_raw) if score_raw!="null" and score_raw!="" else None
-d={"task_id":sys.argv[1],"decision":sys.argv[2],"last_decision":sys.argv[3],
+# argv[2]=state (READY_FOR_REVIEW|FAILED|PAUSED), argv[3]=last_decision (PASS|FAIL|NEED_USER_INPUT)
+d={"task_id":sys.argv[1],"state":sys.argv[2],"decision":sys.argv[3],"last_decision":sys.argv[3],
    "current_attempt":int(sys.argv[4]),"max_attempts":int(sys.argv[5]),
    "message":sys.argv[6],"questions_for_user":json.loads(sys.argv[7]),
    "pause_category":sys.argv[8],"pause_reason_code":sys.argv[9],
    "final_head_commit":sys.argv[10],"updated_at":sys.argv[12],
    "state_version":int(sys.argv[13]),
    "final_score_0_100":score,
-   "verdict_summary":sys.argv[14],
+   "verdict_summary":sys.argv[14] if len(sys.argv)>14 and sys.argv[14] else None,
    "paths":{"status_json":"status.json","final_summary_json":"final_summary.json"}}
 print(json.dumps(d))
-' "$TASK_ID" "$decision" "$last_dec" "$cur_att" "$max_att" \
+' "$TASK_ID" "$state" "$last_dec" "$cur_att" "$max_att" \
   "$msg" "$q_json" "$pcat" "$prcode" "$head_c" \
   "$score" "$(now_iso)" "$STATE_VERSION" "$verdict_summary" \
   | python3 "$ATOMIC_WRITE" "${TASK_DIR}/final_summary.json" -
@@ -229,45 +232,51 @@ print(json.dumps(d))
 write_evidence() {
   local att_dir="$1" att_num="$2" wt_path="$3" head_c="$4"
   local tcmd="$5" trc="$6" tlog_tail="$7" cmds_json="$8"
+  local coder_output_path="${9:-}"
+  local task_code="${10:-}"
   python3 -c '
 import json,sys
 d={"schema_version":"v1","task_id":sys.argv[1],"attempt":int(sys.argv[2]),
-   "worktree_path":sys.argv[3],"created_at":sys.argv[4],
+   "task_code":sys.argv[11],"worktree_path":sys.argv[3],"created_at":sys.argv[4],
    "git":{"diff_stat_path":"git/diff.stat","diff_patch_path":"git/diff.patch",
           "head_commit":sys.argv[5]},
    "commands":json.loads(sys.argv[6]),
    "test":{"cmd":sys.argv[7],"rc":int(sys.argv[8]),"log_tail":sys.argv[9]},
    "artifacts":[],"metrics_path":"metrics.json"}
-print(json.dumps(d))
+if len(sys.argv) > 10 and sys.argv[10]:
+  try:
+    with open(sys.argv[10], encoding="utf-8") as f: d["coder_output"]=f.read()
+  except Exception: pass
+print(json.dumps(d, ensure_ascii=False))
 ' "$TASK_ID" "$att_num" "$wt_path" "$(now_iso)" "$head_c" \
   "$cmds_json" "$tcmd" "$trc" "$tlog_tail" \
+  "$coder_output_path" "$task_code" \
   | python3 "$ATOMIC_WRITE" "${att_dir}/evidence.json" -
 }
 
 write_env_json() {
-  local att_dir="$1"
+  local att_dir="$1" task_code="${2:-}" att_num="${3:-}"
   local os_info git_ver node_ver py_ver
   os_info=$(uname -srm 2>/dev/null || echo "unknown")
   git_ver=$(git --version 2>/dev/null || echo "unknown")
   node_ver=$(node -v 2>/dev/null || echo "N/A")
   py_ver=$(python3 -V 2>/dev/null || echo "N/A")
-  local cur_avail="false" cur_path="" codex_avail="false" codex_path="" claude_avail="false" claude_path=""
-  # Cursor execution via queue only (README ## Cursor execution)
-  local qcli="${LIB_DIR}/../adapters/cursor_queue_cli.sh"
-  [ -x "$qcli" ] && { cur_avail="true"; cur_path="$qcli"; }
+  local codex_avail="false" codex_path="" claude_avail="false" claude_path=""
+  # Cursor uses cliapi (8000), no local binary; other CLIs for env diagnostics only
   command -v codex >/dev/null 2>&1 && { codex_avail="true"; codex_path=$(command -v codex); }
   command -v claude >/dev/null 2>&1 && { claude_avail="true"; claude_path=$(command -v claude); }
   python3 -c '
 import json,sys
 d={"os":sys.argv[1],"node_version":sys.argv[2],"python_version":sys.argv[3],
    "git_version":sys.argv[4],
-   "cursor_available":sys.argv[5]=="true","cursor_path":sys.argv[6],
-   "codex_available":sys.argv[7]=="true","codex_path":sys.argv[8],
-   "claude_available":sys.argv[9]=="true","claude_path":sys.argv[10]}
+   "codex_available":sys.argv[5]=="true","codex_path":sys.argv[6],
+   "claude_available":sys.argv[7]=="true","claude_path":sys.argv[8],
+   "task_code":sys.argv[9],"attempt":int(sys.argv[10]) if sys.argv[10] else 0}
 print(json.dumps(d))
 ' "$os_info" "$node_ver" "$py_ver" "$git_ver" \
-  "$cur_avail" "$cur_path" "$codex_avail" "$codex_path" \
+  "$codex_avail" "$codex_path" \
   "$claude_avail" "$claude_path" \
+  "$task_code" "$att_num" \
   | python3 "$ATOMIC_WRITE" "${att_dir}/env.json" -
 }
 
@@ -286,7 +295,105 @@ print(json.dumps(d))
 }
 
 ##############################################################################
-# 2b. Runtime overrides + decision_table helpers
+# 2b. Verdict traceability injection (B4-2/B4-6)
+##############################################################################
+# inject_verdict_traceability <verdict_json_path> <task_json_path>
+# Post-processes verdict.json to add rubric_version_used, rubric_hash_used,
+# scoring_mode_used, thresholds_used, deliverability_index_0_100,
+# improvement_potential_0_100 — only fills missing fields, never overwrites.
+RUBRIC_JSON="${RDLOOP_ROOT}/schemas/judge_rubric.json"
+
+inject_verdict_traceability() {
+  local vpath="$1" tjson="$2"
+  [ ! -f "$vpath" ] && return 0
+  python3 - "$vpath" "$tjson" "$RUBRIC_JSON" "$ATOMIC_WRITE" <<'PYEOF'
+import json, sys, os, math
+
+vpath, tjson, rpath, atomic = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+
+try:
+    with open(vpath, encoding='utf-8') as f:
+        v = json.load(f)
+except Exception:
+    sys.exit(0)
+
+changed = False
+
+# Load rubric for version/hash
+rubric_version = None
+rubric_hash = None
+if os.path.isfile(rpath):
+    try:
+        with open(rpath, encoding='utf-8') as f:
+            r = json.load(f)
+        rubric_version = r.get('rubric_version')
+        rubric_hash = r.get('rubric_hash')
+    except Exception:
+        pass
+
+# Load task spec for scoring_mode and thresholds
+scoring_mode = 'rubric_analytic'
+thresholds_used = None
+if os.path.isfile(tjson):
+    try:
+        with open(tjson, encoding='utf-8') as f:
+            t = json.load(f)
+        scoring_mode = t.get('scoring_mode', 'rubric_analytic') or 'rubric_analytic'
+        rt = t.get('rubric_thresholds')
+        if rt:
+            thresholds_used = rt
+    except Exception:
+        pass
+
+def set_if_missing(key, val):
+    global changed
+    if val is not None and key not in v:
+        v[key] = val
+        changed = True
+
+set_if_missing('rubric_version_used', rubric_version)
+set_if_missing('rubric_hash_used', rubric_hash)
+set_if_missing('scoring_mode_used', scoring_mode)
+set_if_missing('thresholds_used', thresholds_used)
+
+# Compute deliverability_index_0_100 and improvement_potential_0_100 if absent
+if 'deliverability_index_0_100' not in v and 'scores' in v and isinstance(v.get('scores'), dict):
+    scores = v['scores']
+    task_type = v.get('task_type', '')
+    # DI: based on final_score_0_100 if available, else raw weighted hard-gate dims
+    final100 = v.get('final_score_0_100')
+    if final100 is not None:
+        di = max(0, min(100, int(final100)))
+    else:
+        di = 50
+    set_if_missing('deliverability_index_0_100', di)
+
+    # IP: improvement potential based on top_issues count and score headroom
+    top_issues = v.get('top_issues', [])
+    n_issues = len(top_issues) if isinstance(top_issues, list) else 0
+    score_vals = [s for s in scores.values() if isinstance(s, (int, float))]
+    headroom = 0.0
+    if score_vals:
+        headroom = (5.0 - sum(score_vals) / len(score_vals)) / 5.0
+    ip = max(0, min(100, int(headroom * 60 + min(n_issues, 5) * 8)))
+    set_if_missing('improvement_potential_0_100', ip)
+
+if changed:
+    import subprocess
+    payload = json.dumps(v)
+    proc = subprocess.run(
+        ['python3', atomic, vpath, '-'],
+        input=payload.encode('utf-8'),
+        capture_output=True
+    )
+    if proc.returncode != 0:
+        sys.stderr.write('inject_verdict_traceability: atomic write failed\n')
+        sys.exit(1)
+PYEOF
+}
+
+##############################################################################
+# 2c. Runtime overrides + decision_table helpers
 ##############################################################################
 DECISION_TABLE_CLI="${LIB_DIR}/decision_table_cli.js"
 
@@ -334,6 +441,13 @@ act_on_decision() {
 
   case "$ns" in
     READY_FOR_REVIEW)
+      # B4-0: non rubric_analytic must not pass K8 Gate (cannot go to READY_FOR_REVIEW)
+      local scoring_mode; scoring_mode=$(json_read "$TASK_JSON" "scoring_mode" "rubric_analytic")
+      if [ "$scoring_mode" != "rubric_analytic" ]; then
+        log_info "B4-0: scoring_mode=${scoring_mode} is not rubric_analytic; cannot pass K8 Gate"
+        enter_paused "PAUSED_JUDGE_MODE_INVALID" "scoring_mode must be rubric_analytic to pass Gate (current: ${scoring_mode})" "[\"Set TaskSpec.scoring_mode to rubric_analytic for Gate.\"]"
+        NORMAL_EXIT=1; exit 0
+      fi
       write_status "READY_FOR_REVIEW" "$att_num" "$max_att" "false" "$ld" "$msg" "$qj" "" ""
       write_final_summary "READY_FOR_REVIEW" "$ld" "$att_num" "$max_att" "$msg" "$qj" "" "" "$hc" "${final_score_for_summary:-}"
       write_event "$att_num" "STATE_CHANGED" "READY_FOR_REVIEW"
@@ -406,6 +520,7 @@ acquire_lock() {
   fi
   if mkdir "$LOCK_DIR" 2>/dev/null; then
     echo "$$" > "${LOCK_DIR}/pid"
+    hostname > "${LOCK_DIR}/host" 2>/dev/null || true
     now_iso > "${LOCK_DIR}/started_at"
     LOCK_ACQUIRED=1
     return 0
@@ -511,8 +626,11 @@ check_control_pause() {
   return 0
 }
 
+# Set by process_control when RESUME was applied (so cmd_continue skips terminal-state exit)
+CONTROL_RESUME_APPLIED=0
 process_control() {
   local cf="${TASK_DIR}/control.json"
+  CONTROL_RESUME_APPLIED=0
   [ ! -f "$cf" ] && return 0
   local action nonce pf
   action=$(json_read "$cf" "action" "")
@@ -528,6 +646,7 @@ process_control() {
       write_status "RUNNING" "$CURRENT_ATTEMPT" "$ma" "false" "" "" '[]' "" ""
       rm -f "$cf"; [ -n "$nonce" ] && echo "$nonce" >> "$pf"
       write_event "$CURRENT_ATTEMPT" "STATE_CHANGED" "RESUMED via control"
+      CONTROL_RESUME_APPLIED=1
       ;;
     EDIT_INSTRUCTION)
       local ea et; ea=$(json_read "$cf" "payload.attempt" "0")
@@ -657,11 +776,31 @@ setup_worktree() {
 }
 
 ##############################################################################
+# 8b. Artifacts copy (K8-4) — worktree artifacts/ → out/<task_id>/artifacts/
+##############################################################################
+copy_artifacts() {
+  local wt="$1" att_num="$2"
+  local src="${wt}/artifacts"
+  local dst="${TASK_DIR}/artifacts"
+  [ ! -d "$src" ] && return 0
+  local pad; pad=$(printf "%03d" "$att_num")
+  mkdir -p "${dst}/attempt_${pad}"
+  cp -R "${src}/." "${dst}/attempt_${pad}/" 2>/dev/null || true
+  for f in requirements.md spec.json; do
+    [ -f "${dst}/attempt_${pad}/${f}" ] && cp "${dst}/attempt_${pad}/${f}" "${dst}/${f}" 2>/dev/null || true
+  done
+  log_info "Artifacts copied from worktree to ${dst}/ (attempt ${att_num})"
+}
+
+##############################################################################
 # 9. Build coder instruction with context — §5.4
 ##############################################################################
 build_instruction() {
   local att_dir="$1" att_num="$2" wt="$3" bref="$4" goal="$5" acceptance="$6"
   local ifile="${att_dir}/coder/instruction.txt"
+  local task_type; task_type=$(json_read "$TASK_JSON" "task_type" "")
+  local is_eng_impl=""
+  [ "$task_type" = "engineering_impl" ] || [ "$task_type" = "engineering_implementation" ] && is_eng_impl="1"
   mkdir -p "${att_dir}/coder"
   {
     echo "=== CONTEXT ==="
@@ -677,21 +816,25 @@ build_instruction() {
           echo ""
         fi
       fi
-      local prc_f="${TASK_DIR}/attempt_${pp}/test/rc.txt"
-      local plog="${TASK_DIR}/attempt_${pp}/test/stdout.log"
-      if [ -f "$prc_f" ]; then
-        local prc; prc=$(cat "$prc_f" 2>/dev/null || echo "")
-        echo "Previous test result: rc=${prc}"
-        [ -f "$plog" ] && { echo "Previous test log (tail ${TEST_LOG_TAIL_LINES} lines):"; tail -n "$TEST_LOG_TAIL_LINES" "$plog" 2>/dev/null || true; }
-        echo ""
+      if [ -n "$is_eng_impl" ]; then
+        local prc_f="${TASK_DIR}/attempt_${pp}/test/rc.txt"
+        local plog="${TASK_DIR}/attempt_${pp}/test/stdout.log"
+        if [ -f "$prc_f" ]; then
+          local prc; prc=$(cat "$prc_f" 2>/dev/null || echo "")
+          echo "Previous test result: rc=${prc}"
+          [ -f "$plog" ] && { echo "Previous test log (tail ${TEST_LOG_TAIL_LINES} lines):"; tail -n "$TEST_LOG_TAIL_LINES" "$plog" 2>/dev/null || true; }
+          echo ""
+        fi
       fi
     fi
-    echo "Current diff --stat from ${bref}:"
-    git -C "$wt" diff --stat "${bref}...HEAD" 2>/dev/null || echo "(no diff)"
-    echo ""
-    echo "Current HEAD:"
-    git -C "$wt" log -1 --oneline 2>/dev/null || echo "(no commits)"
-    echo ""
+    if [ -n "$is_eng_impl" ]; then
+      echo "Current diff --stat from ${bref}:"
+      git -C "$wt" diff --stat "${bref}...HEAD" 2>/dev/null || echo "(no diff)"
+      echo ""
+      echo "Current HEAD:"
+      git -C "$wt" log -1 --oneline 2>/dev/null || echo "(no commits)"
+      echo ""
+    fi
     echo "=== END CONTEXT ==="
     echo ""
     echo "=== GOAL ==="
@@ -722,21 +865,38 @@ run_attempt() {
   test_cmd=$(json_read "$TASK_JSON" "test_cmd" "true")
   coder_type=$(json_read "$TASK_JSON" "coder" "")
   judge_type=$(json_read "$TASK_JSON" "judge" "")
-  # A6-2: Fallback to rdloop.config.json when TaskSpec does not specify coder/judge
+  coder_model=$(json_read "$TASK_JSON" "coder_model" "")
+  judge_model=$(json_read "$TASK_JSON" "judge_model" "")
+  # A6-2: Fallback to rdloop.config.json when TaskSpec does not specify coder/judge/model
   local config_json="${RDLOOP_ROOT}/rdloop.config.json"
   if [ -f "$config_json" ]; then
     [ -z "$coder_type" ] && coder_type=$(json_read "$config_json" "default_coder" "mock")
     [ -z "$judge_type" ] && judge_type=$(json_read "$config_json" "default_judge" "mock")
+    [ -z "$coder_model" ] && coder_model=$(json_read "$config_json" "default_coder_model" "")
+    [ -z "$judge_model" ] && judge_model=$(json_read "$config_json" "default_judge_model" "")
   fi
   [ -z "$coder_type" ] && coder_type="mock"
   [ -z "$judge_type" ] && judge_type="mock"
+  # Unique task code + attempt for handoff tracing (coder/judge 1:1)
+  local task_code; task_code=$(json_read "$TASK_JSON" "task_code" "")
+  if [ -z "$task_code" ]; then
+    task_code="rdloop-$(date +%s)-$$-${RANDOM}"
+    python3 -c "import json; d=json.load(open('$TASK_JSON')); d['task_code']='$task_code'; json.dump(d, open('$TASK_JSON','w'), indent=2)"
+  fi
+  export RDLOOP_TASK_CODE="$task_code"
+  export RDLOOP_ATTEMPT="$att_num"
+  export CODER_MODEL="$coder_model"
+  export JUDGE_MODEL="$judge_model"
   # Map display names to script suffix (call_coder_${suffix}.sh / call_judge_${suffix}.sh)
-  case "$coder_type" in cursor-agent|cursor_cli) coder_script_suffix="cursor";; codex-cli|codex_cli) coder_script_suffix="codex";; *) coder_script_suffix="$coder_type";; esac
-  case "$judge_type" in cursor-agent|cursor_cli) judge_script_suffix="cursor";; codex-cli|codex_cli) judge_script_suffix="codex";; *) judge_script_suffix="$judge_type";; esac
+  case "$coder_type" in cursor-agent|cursor_cli) coder_script_suffix="cursor";; codex-cli|codex_cli) coder_script_suffix="codex";; claude-bridge|claude_bridge) coder_script_suffix="claude_bridge";; antigravity-cli) coder_script_suffix="antigravity";; *) coder_script_suffix="$coder_type";; esac
+  case "$judge_type" in cursor-agent|cursor_cli) judge_script_suffix="cursor";; codex-cli|codex_cli) judge_script_suffix="codex";; antigravity-cli) judge_script_suffix="antigravity";; *) judge_script_suffix="$judge_type";; esac
   coder_timeout=$(json_read "$TASK_JSON" "coder_timeout_seconds" "600")
   test_timeout=$(json_read "$TASK_JSON" "test_timeout_seconds" "300")
   judge_timeout=$(json_read "$TASK_JSON" "judge_timeout_seconds" "300")
   max_att=$(json_read "$TASK_JSON" "max_attempts" "3")
+  local task_type; task_type=$(json_read "$TASK_JSON" "task_type" "")
+  local is_eng_impl=""
+  [ "$task_type" = "engineering_impl" ] || [ "$task_type" = "engineering_implementation" ] && is_eng_impl="1"
 
   mkdir -p "${att_dir}/coder" "${att_dir}/test" "${att_dir}/git" "${att_dir}/judge"
 
@@ -746,7 +906,7 @@ run_attempt() {
 
   # Worktree
   local wt; wt=$(setup_worktree "$att_num" "$repo" "$base_ref")
-  write_env_json "$att_dir"
+  write_env_json "$att_dir" "$task_code" "$att_num"
 
   # ---- BEFORE_CODER ----
   check_control_pause "BEFORE_CODER"
@@ -756,19 +916,7 @@ run_attempt() {
   c_start=$(now_iso)
   write_event "$att_num" "CODER_STARTED" "coder=${coder_type}" "$att_dir" "$wt"
 
-  # Cursor execution must go through queue (README ## Cursor execution); do not call cursor-agent directly
-  if [ "$coder_type" = "cursor_cli" ] || [ "$coder_type" = "cursor-agent" ]; then
-    local queue_cli="${LIB_DIR}/../adapters/cursor_queue_cli.sh"
-    if [ ! -f "$queue_cli" ] || [ ! -x "$queue_cli" ]; then
-      echo "127" > "${att_dir}/coder/rc.txt"
-      echo "[CODER] cursor queue CLI required (README ## Cursor execution)" > "${att_dir}/coder/run.log"
-      write_event "$att_num" "CODER_FINISHED" "rc=127 queue CLI missing" "$att_dir" "$wt"
-      enter_paused "PAUSED_CURSOR_MISSING" "cursor_queue_cli.sh not found or not executable (do not call cursor-agent directly)" \
-        "[\"Use coordinator/adapters/cursor_queue_cli.sh; see README ## Cursor execution\"]"
-      NORMAL_EXIT=1; exit 0
-    fi
-  fi
-
+  # Cursor uses cliapi (cursorcliapi 8000), same as other adapters; no queue CLI required
   local ifile; ifile=$(build_instruction "$att_dir" "$att_num" "$wt" "$base_ref" "$goal" "$acceptance")
   local coder_script="${LIB_DIR}/call_coder_${coder_script_suffix}.sh"
   if [ ! -f "$coder_script" ]; then
@@ -812,42 +960,76 @@ run_attempt() {
     act_on_decision "$dj" "" "$att_num" "$max_att"
   fi
 
+  # Coder did not complete successfully (any other non-zero): do not run test or judge — no valid coder output to evaluate
+  if [ "$coder_rc" != "0" ]; then
+    log_info "Coder did not complete (rc=${coder_rc}); skipping test and judge"
+    write_event "$att_num" "CODER_FAILED_SKIP_JUDGE" "rc=${coder_rc} — no test/judge run"
+    enter_paused "PAUSED_CODER_FAILED" \
+      "Coder did not complete (rc=${coder_rc}). Test and judge were not run." \
+      "[\"Coder step failed (rc=${coder_rc}). Check coder/run.log and adapter (cliapi gateway); then use Run Next to retry.\"]" \
+      "NEED_USER_INPUT" "" "true"
+    NORMAL_EXIT=1; exit 0
+  fi
+
+  # Skip test and judge when run.log has no substantial coder output (do this before test so we never run test then pause without judge)
+  local coder_log="${att_dir}/coder/run.log"
+  local coder_log_size=0
+  [ -f "$coder_log" ] && coder_log_size=$(wc -c < "$coder_log" 2>/dev/null || echo "0")
+  if [ "$coder_log_size" -lt 600 ] 2>/dev/null; then
+    log_info "Coder run.log too small (${coder_log_size} bytes); skipping test and judge"
+    write_event "$att_num" "SKIP_TEST_JUDGE_NO_CODER_OUTPUT" "run.log size=${coder_log_size}"
+    enter_paused "PAUSED_CODER_NO_OUTPUT" \
+      "No substantial coder output (run.log too small). Test and judge were not run." \
+      "[\"Coder run.log has only ${coder_log_size} bytes (need ≥600). Check out/<task_id>/attempt_*/coder/run.log and ensure the coder adapter (cliapi gateway) is running and returning output; then use Run Next to retry.\"]" \
+      "NEED_USER_INPUT" "" "true"
+    NORMAL_EXIT=1; exit 0
+  fi
+
   check_control_pause "AFTER_CODER"
   check_control_pause "BEFORE_TEST"
 
-  # ---- TEST ----
+  # ---- TEST (only for engineering_impl; other task types skip test) ----
   local t_start t_fin test_rc
   t_start=$(now_iso)
-  write_event "$att_num" "TEST_STARTED" "cmd=${test_cmd}" "$att_dir" "$wt"
-  local t_s_epoch; t_s_epoch=$(date +%s)
+  if [ -n "$is_eng_impl" ]; then
+    write_event "$att_num" "TEST_STARTED" "cmd=${test_cmd}" "$att_dir" "$wt"
+    local t_s_epoch; t_s_epoch=$(date +%s)
 
-  local tout=""
-  command -v timeout >/dev/null 2>&1 && tout="timeout"
-  [ -z "$tout" ] && command -v gtimeout >/dev/null 2>&1 && tout="gtimeout"
+    local tout=""
+    command -v timeout >/dev/null 2>&1 && tout="timeout"
+    [ -z "$tout" ] && command -v gtimeout >/dev/null 2>&1 && tout="gtimeout"
 
-  set +e
-  if [ -n "$tout" ]; then
-    $tout "$test_timeout" bash -lc "cd '${wt}' && ${test_cmd}" > "${att_dir}/test/stdout.log" 2>&1
-    test_rc=$?
+    set +e
+    if [ -n "$tout" ]; then
+      $tout "$test_timeout" bash -lc "cd '${wt}' && ${test_cmd}" > "${att_dir}/test/stdout.log" 2>&1
+      test_rc=$?
+    else
+      bash -lc "cd '${wt}' && ${test_cmd}" > "${att_dir}/test/stdout.log" 2>&1
+      test_rc=$?
+    fi
+    set -e
+    [ "$test_rc" = "124" ] && echo "TIMEOUT after ${test_timeout}s" >> "${att_dir}/test/stdout.log"
+
+    local t_e_epoch; t_e_epoch=$(date +%s)
+    local t_secs=$(( t_e_epoch - t_s_epoch ))
+    echo "$test_rc" > "${att_dir}/test/rc.txt"
+    t_fin=$(now_iso)
+    write_event "$att_num" "TEST_FINISHED" "rc=${test_rc}" "$att_dir" "$wt"
+    write_commands_log "$att_num" "test:${test_cmd}" "$test_rc" "$t_secs" "$cmd_log"
+
+    # rc=124: test timeout → decision_table (consume=true for test)
+    if [ "$test_rc" = "124" ]; then
+      update_consecutive_timeout "test" "$test_rc"
+      local dj; dj=$(call_decision_table "test" 124 "TIMEOUT")
+      act_on_decision "$dj" "" "$att_num" "$max_att"
+    fi
   else
-    bash -lc "cd '${wt}' && ${test_cmd}" > "${att_dir}/test/stdout.log" 2>&1
-    test_rc=$?
-  fi
-  set -e
-  [ "$test_rc" = "124" ] && echo "TIMEOUT after ${test_timeout}s" >> "${att_dir}/test/stdout.log"
-
-  local t_e_epoch; t_e_epoch=$(date +%s)
-  local t_secs=$(( t_e_epoch - t_s_epoch ))
-  echo "$test_rc" > "${att_dir}/test/rc.txt"
-  t_fin=$(now_iso)
-  write_event "$att_num" "TEST_FINISHED" "rc=${test_rc}" "$att_dir" "$wt"
-  write_commands_log "$att_num" "test:${test_cmd}" "$test_rc" "$t_secs" "$cmd_log"
-
-  # rc=124: test timeout → decision_table (consume=true for test)
-  if [ "$test_rc" = "124" ]; then
-    update_consecutive_timeout "test" "$test_rc"
-    local dj; dj=$(call_decision_table "test" 124 "TIMEOUT")
-    act_on_decision "$dj" "" "$att_num" "$max_att"
+    echo "0" > "${att_dir}/test/rc.txt"
+    echo "(test skipped for non-engineering_impl task_type)" > "${att_dir}/test/stdout.log"
+    test_rc=0
+    t_fin=$(now_iso)
+    write_event "$att_num" "TEST_FINISHED" "rc=0 skipped (task_type=${task_type})" "$att_dir" "$wt"
+    write_commands_log "$att_num" "test:skipped" "0" "0" "$cmd_log"
   fi
 
   check_control_pause "AFTER_TEST"
@@ -880,7 +1062,7 @@ print(json.dumps(cs))
 " "$cmd_log" 2>/dev/null || echo "[]")
   fi
 
-  write_evidence "$att_dir" "$att_num" "$wt" "$hc" "$test_cmd" "$test_rc" "$tlog_tail" "$cmds_json"
+  write_evidence "$att_dir" "$att_num" "$wt" "$hc" "$test_cmd" "$test_rc" "$tlog_tail" "$cmds_json" "${att_dir}/coder/run.log" "$task_code"
   write_event "$att_num" "EVIDENCE_PACKED" "evidence.json written" "$att_dir" "$wt"
 
   check_control_pause "BEFORE_JUDGE"
@@ -909,8 +1091,16 @@ print(json.dumps(cs))
     NORMAL_EXIT=1; exit 0
   fi
 
+  # Judge prompt: prefer task_type-specific file (e.g. judge.prompt.requirements_doc.md), fallback to judge.prompt.md
+  local task_type_tt; task_type_tt=$(json_read "$TASK_JSON" "task_type" "")
   local jprompt="${PROMPTS_DIR}/judge.prompt.md"
+  if [ -n "$task_type_tt" ] && [ -f "${PROMPTS_DIR}/judge.prompt.${task_type_tt}.md" ]; then
+    jprompt="${PROMPTS_DIR}/judge.prompt.${task_type_tt}.md"
+  fi
   local jvalid=0
+
+  # B4-7: run.log records Judge temperature=0 (deterministic output)
+  log_info "Judge run with temperature=0 (B4-7)"
 
   while [ "$j_retries" -le "$JUDGE_MAX_RETRIES" ]; do
     local j_s_e; j_s_e=$(date +%s)
@@ -970,6 +1160,9 @@ print(json.dumps(cs))
   fi
 
   check_control_pause "AFTER_JUDGE"
+
+  # ---- B4-2/B4-6: Inject traceability fields into verdict.json ----
+  inject_verdict_traceability "${att_dir}/judge/verdict.json" "$TASK_JSON" || true
 
   # ---- DECISION (via decision_table) ----
   # 1. Run validate_verdict.py to check structural + K5-3 consistency
@@ -1047,6 +1240,11 @@ print(json.dumps(cs))
 
   # Reset consecutive timeout on successful judge completion
   update_consecutive_timeout "judge" "$judge_rc"
+
+  # K8-4: Copy artifacts from worktree to out/<task_id>/artifacts/ when judge will PASS
+  if [ "$decision" = "PASS" ] && [ "$verdict_gated" = "false" ] && [ "$thresholds_pass" = "true" ]; then
+    copy_artifacts "$wt" "$att_num"
+  fi
 
   local dj; dj=$(call_decision_table "judge" "$judge_rc" "" "$decision" "$verdict_gated" "$thresholds_pass")
   act_on_decision "$dj" "$hc" "$att_num" "$max_att"
@@ -1175,11 +1373,12 @@ cmd_new_task() {
     NORMAL_EXIT=1; exit 0
   fi
   mkdir -p "$TASK_DIR"
-  # Copy spec + fill created_at
+  # Copy spec + fill created_at + generate unique task_code for handoff tracing
   python3 -c "
-import json,sys,datetime
+import json,sys,datetime,uuid
 with open(sys.argv[1]) as f: d=json.load(f)
 if not d.get('created_at'): d['created_at']=datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+if not d.get('task_code'): d['task_code']=str(uuid.uuid4())
 with open(sys.argv[2],'w') as f: json.dump(d,f,indent=2)
 " "$sf" "${TASK_DIR}/task.json"
   TASK_JSON="${TASK_DIR}/task.json"
@@ -1256,7 +1455,11 @@ cmd_continue() {
   done
   CURRENT_ATTEMPT=$mx
   process_control
+  # If user sent RESUME from READY_FOR_REVIEW/FAILED, we just set RUNNING; do not exit as terminal state
   local cs=""; [ -f "${TASK_DIR}/status.json" ] && cs=$(json_read "${TASK_DIR}/status.json" "state" "")
+  if [ "$CONTROL_RESUME_APPLIED" = "1" ]; then
+    cs="RUNNING"
+  fi
   if [ "$cs" = "READY_FOR_REVIEW" ] || [ "$cs" = "FAILED" ]; then
     log_info "Task ${tid} in terminal state: ${cs}"; NORMAL_EXIT=1; exit 0
   fi

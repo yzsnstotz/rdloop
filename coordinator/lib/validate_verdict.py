@@ -27,19 +27,24 @@ VALID_DECISIONS = {"PASS", "FAIL", "NEED_USER_INPUT"}
 # Valid score values: 0, 0.5, 1.0, ..., 5.0
 VALID_SCORES = {i * 0.5 for i in range(11)}  # 0.0, 0.5, 1.0, ... 5.0
 
-# K5-3 keyword → dimension mapping for reason-score alignment
-KEYWORD_DIM_MAX = {
-    "缺失": {"completeness": 4.0, "scene_completeness": 4.0},
-    "未覆盖验收": {"acceptance_testability": 4.0},
-    "不可运行": {"runnability": 3.0},
-    "安全漏洞": {"security": 3.0},
-    "测试缺失": {"test_and_validation": 3.0},
-    "逻辑错误": {"correctness": 3.0},
-    "不清晰": {"clarity": 4.0, "visual_clarity": 4.0},
-    "合规问题": {"constraints_and_compliance": 3.0, "platform_compliance": 3.0},
-    "missing": {"completeness": 4.0, "scene_completeness": 4.0},
-    "not runnable": {"runnability": 3.0},
-}
+# K5-3 keyword → dimension mapping for reason-score alignment (v1.8.1)
+# Format: list of (keywords_or_list, dimension, max_score)
+# keywords_or_list: any keyword in the list matches (OR relationship, case-insensitive substring)
+KEYWORD_DIM_MAX = [
+    (["验收脚本路径不明确", "缺失", "未覆盖验收"], "acceptance_testability", 4.0),
+    (["缺少关键章节", "未覆盖全量需求", "缺口"], "completeness", 4.0),
+    (["歧义", "表述不清", "边界模糊"], "clarity", 4.0),
+    (["合规", "xss", "路径穿越", "安全未写清"], "constraints_and_compliance", 4.0),
+    (["原子写", "flush", "并发", "异常流未定义"], "risk_and_exception", 4.0),
+    (["实现路径未说明", "降级路径缺失"], "feasibility", 4.0),
+    (["修订记录与正文重复", "结构重叠"], "structure_and_readability", 4.0),
+    # Legacy English keywords for backward compatibility
+    (["missing", "not covered"], "completeness", 4.0),
+    (["not runnable", "cannot run"], "runnability", 3.0),
+    (["security issue", "security vulnerability"], "security", 3.0),
+    (["test missing", "no tests"], "test_and_validation", 3.0),
+    (["logic error", "incorrect", "逻辑错误"], "correctness", 3.0),
+]
 
 RUBRIC_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "schemas", "judge_rubric.json")
 # C3-1: Path to the v2 JSON Schema definition
@@ -245,7 +250,11 @@ def validate_v2_structural(data):
         types = rubric.get("task_types", {})
         if normalized_type in types:
             tt = types[normalized_type]
-            expected_dims = set(tt["dimensions"])
+            dims_raw = tt.get("dimensions") or []
+            if dims_raw and isinstance(dims_raw[0], dict):
+                expected_dims = set(d.get("dim_key") for d in dims_raw if isinstance(d, dict) and d.get("dim_key"))
+            else:
+                expected_dims = set(d for d in dims_raw if isinstance(d, str))
             actual_dims = set(scores.keys())
             if expected_dims != actual_dims:
                 errors.append("task_type '%s' expects dimensions %s but got %s" % (
@@ -279,16 +288,17 @@ def check_k5_3_consistency(data):
                 inconsistencies.append("ANTI_FLAT: stddev = %.3f < 0.15 with only %d distinct values" % (
                     stddev, distinct))
 
-    # Reason-score alignment: keyword → dimension max score
+    # Reason-score alignment: keyword → dimension max score (K5-3 v1.8.1)
+    # KEYWORD_DIM_MAX is now a list of (keywords_or_list, dimension, max_score)
     if isinstance(top_issues, list):
         issues_text = " ".join(str(i) for i in top_issues).lower()
-        for keyword, dim_max_map in KEYWORD_DIM_MAX.items():
-            if keyword.lower() in issues_text:
-                for dim, max_score in dim_max_map.items():
-                    if dim in scores and scores[dim] > max_score:
-                        inconsistencies.append(
-                            "KEYWORD_MISMATCH: top_issues mentions '%s' but %s = %.1f (max %.1f)" % (
-                                keyword, dim, scores[dim], max_score))
+        for rule in KEYWORD_DIM_MAX:
+            keywords_or, dim, max_score = rule
+            matched_kw = next((kw for kw in keywords_or if kw.lower() in issues_text), None)
+            if matched_kw and dim in scores and scores[dim] > max_score:
+                inconsistencies.append(
+                    "KEYWORD_MISMATCH: top_issues mentions '%s' but %s = %.1f (max %.1f)" % (
+                        matched_kw, dim, scores[dim], max_score))
 
     # top_issues count: 0 issues with non-perfect score → INCONSISTENT
     perfect = all(v == 5.0 for v in score_values) if score_values else True

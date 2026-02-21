@@ -13,7 +13,9 @@ const TASKS_DIR = path.resolve(__dirname, '..', 'tasks');
 const EXAMPLES_DIR = path.resolve(__dirname, '..', 'examples');
 const COORDINATOR_LIB = path.resolve(__dirname, '..', 'coordinator', 'lib');
 const RUBRIC_PATH = path.resolve(__dirname, '..', 'schemas', 'judge_rubric.json');
+const PROMPTS_DIR = path.resolve(__dirname, '..', 'prompts');
 const RDLOOP_CONFIG_PATH = path.resolve(__dirname, '..', 'rdloop.config.json');
+const CLIAPI_PROVIDERS_PATH = path.resolve(__dirname, '..', 'config', 'cliapi_providers.json');
 const WORKTREES_DIR = path.resolve(__dirname, '..', 'worktrees');
 
 // Env for coordinator so cursor-agent/codex are found (GUI may run with minimal PATH)
@@ -38,7 +40,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 // Helper: validate taskId — alphanumeric, underscore, hyphen only (C0-2)
 const VALID_TASK_ID = /^[A-Za-z0-9_-]+$/;
 function isValidTaskId(taskId) {
-  return VALID_TASK_ID.test(taskId);
+  return typeof taskId === 'string' && VALID_TASK_ID.test(taskId);
 }
 
 // Middleware: validate taskId param and guard path traversal (C0-2)
@@ -162,7 +164,7 @@ function atomicWriteJSON(filepath, data) {
 // GET /api/tasks — cursor-based pagination (5.1)
 app.get('/api/tasks', (req, res) => {
   try {
-    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 6, 1), 100);
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 100);
     const cursorStr = req.query.cursor || null;
     const cursor = cursorStr ? decodeCursor(cursorStr) : null;
 
@@ -230,6 +232,7 @@ app.get('/api/tasks', (req, res) => {
   }
 });
 
+// Task instance routes: allow taskId with slashes (e.g. requirements_doc/test/run_001)
 // GET /api/tasks/:id/events — events with tail support (5.2)
 app.get('/api/tasks/:taskId/events', validateTaskId, (req, res) => {
   const taskId = req.params.taskId;
@@ -330,6 +333,16 @@ function resolveLiveLogPath(taskDir, logName) {
       for (const p of oldNames) {
         if (fs.existsSync(p)) return p;
       }
+      // Judge adapters (e.g. antigravity) often write only verdict.json; use it as live "log" for the Judge tab
+      if (role === 'judge') {
+        const verdictPath = path.join(roleDir, 'verdict.json');
+        if (fs.existsSync(verdictPath)) {
+          try {
+            const verdict = readJSON(verdictPath);
+            return { synthetic: JSON.stringify(verdict, null, 2) };
+          } catch {}
+        }
+      }
     }
     const guiRoleLog = path.join(guiDir, logName);
     if (fs.existsSync(guiRoleLog)) return guiRoleLog;
@@ -338,7 +351,7 @@ function resolveLiveLogPath(taskDir, logName) {
   return null;
 }
 
-// GET /api/task/:taskId/log/:logName — live log with etag/304 (K4-1), B2-1 unified path
+// GET /api/task/:taskId/log/:logName — live log with etag/304 (K4-1), B2-1 unified path (always latest attempt for coder/judge)
 app.get('/api/task/:taskId/log/:logName', validateTaskId, (req, res) => {
   const taskId = req.params.taskId;
   const logName = req.params.logName;
@@ -443,6 +456,16 @@ app.get('/api/task/:taskId/attempt/:n', validateTaskId, (req, res) => {
   const instruction = readFile(path.join(coderDir, 'instruction.txt')) || readFile(path.join(attDir, 'coder', 'instruction.txt'));
   const env = readJSON(path.join(attDir, 'env.json'));
 
+  // Coder/Judge input and output for attempt detail (full display)
+  const coderOutput = readFile(path.join(coderDir, 'run.log'));
+  const taskJson = readJSON(path.join(OUT_DIR, taskId, 'task.json'));
+  const taskType = taskJson?.task_type || '';
+  let judgePromptPath = path.join(PROMPTS_DIR, 'judge.prompt.md');
+  if (taskType && fs.existsSync(path.join(PROMPTS_DIR, `judge.prompt.${taskType}.md`))) {
+    judgePromptPath = path.join(PROMPTS_DIR, `judge.prompt.${taskType}.md`);
+  }
+  const judgePromptText = fs.existsSync(judgePromptPath) ? readFile(judgePromptPath) : null;
+
   res.json({
     // B3-1: Fixed field set
     task_id: taskId,
@@ -452,6 +475,7 @@ app.get('/api/task/:taskId/attempt/:n', validateTaskId, (req, res) => {
     rc,
     updated_at,
     verdict_summary: verdictSummary,
+    task_type: taskType,
     // Legacy fields for backward compat (B3-2 frontend uses fixed fields above)
     verdict,
     evidence,
@@ -460,7 +484,10 @@ app.get('/api/task/:taskId/attempt/:n', validateTaskId, (req, res) => {
     test_log: testLog,
     diff_stat: diffStat,
     instruction,
-    env
+    env,
+    // Coder/Judge input and output for attempt detail panels
+    coder_output: coderOutput,
+    judge_prompt_text: judgePromptText
   });
 });
 
@@ -486,7 +513,7 @@ app.post('/api/task/:taskId/control', validateTaskId, (req, res) => {
 });
 
 // POST /api/task/:taskId/run — trigger coordinator
-app.post('/api/task/:taskId/run', validateTaskId, (req, res) => {
+app.post('/api/task/:taskId/run', requireWritable, validateTaskId, (req, res) => {
   const taskId = req.params.taskId;
   const taskDir = path.join(OUT_DIR, taskId);
   const force = req.query.force === '1';
@@ -527,6 +554,48 @@ app.post('/api/task/:taskId/run', validateTaskId, (req, res) => {
 
 const START_TIME = Date.now();
 const AUDIT_DIR = path.join(OUT_DIR, '_audit');
+const DELETED_RECORDS_DIR = path.join(OUT_DIR, '_deleted');
+
+// Helper: safe filename segment for state (no path traversal)
+function stateToFileSegment(state) {
+  if (state == null || state === '') return 'UNKNOWN';
+  const s = String(state).replace(/[^A-Za-z0-9_-]/g, '_');
+  return s || 'UNKNOWN';
+}
+
+// Helper: record a task as "deleted from sidebar" — append to manifest and by_state (categorized)
+function recordDeletedFromSidebar(taskId, status) {
+  try {
+    const isNewDir = !fs.existsSync(DELETED_RECORDS_DIR);
+    if (isNewDir) {
+      fs.mkdirSync(DELETED_RECORDS_DIR, { recursive: true });
+      fs.writeFileSync(
+        path.join(DELETED_RECORDS_DIR, 'README.md'),
+        '# Deleted-from-sidebar records\n\nTasks removed from the GUI sidebar (×) are recorded here.\n\n- `manifest.jsonl` — one JSON object per line: task_id, deleted_at, state, last_decision, message, current_attempt, updated_at.\n- `by_state/` — same records grouped by state (e.g. READY_FOR_REVIEW.jsonl, FAILED.jsonl).\n'
+      );
+    }
+    const state = normalizeState(status?.state || 'UNKNOWN');
+    const deletedAt = new Date().toISOString();
+    const record = {
+      task_id: taskId,
+      deleted_at: deletedAt,
+      state,
+      last_decision: status?.last_decision ?? '',
+      message: (status?.message ?? '').slice(0, 500),
+      current_attempt: status?.current_attempt ?? 0,
+      updated_at: normalizeUpdatedAt(status?.updated_at) || ''
+    };
+    const line = JSON.stringify(record) + '\n';
+    const manifestPath = path.join(DELETED_RECORDS_DIR, 'manifest.jsonl');
+    fs.appendFileSync(manifestPath, line);
+    const byStateDir = path.join(DELETED_RECORDS_DIR, 'by_state');
+    if (!fs.existsSync(byStateDir)) fs.mkdirSync(byStateDir, { recursive: true });
+    const stateFile = path.join(byStateDir, stateToFileSegment(state) + '.jsonl');
+    fs.appendFileSync(stateFile, line);
+  } catch (err) {
+    console.error('recordDeletedFromSidebar:', err.message);
+  }
+}
 
 // Helper: ensure audit dir exists and append to audit log (K7-3)
 function auditLog(entry) {
@@ -551,7 +620,9 @@ app.get('/api/health', (req, res) => {
     res.json({
       status: 'ok',
       uptime_ms: Date.now() - START_TIME,
-      task_count: taskCount
+      task_count: taskCount,
+      read_only: READ_ONLY,
+      allow_partial_run: ALLOW_PARTIAL_RUN
     });
   } catch (err) {
     res.status(500).json({ status: 'error', error: err.message });
@@ -574,8 +645,20 @@ app.get('/api/tasks/:taskId/status', validateTaskId, (req, res) => {
   res.json(status);
 });
 
-// POST /api/tasks/:taskId/runtime_overrides — D1: atomic write + max_attempts range [current_attempt, 50]
-app.post('/api/tasks/:taskId/runtime_overrides', validateTaskId, (req, res) => {
+// POST /api/tasks/:taskId/record-hidden — record task as removed from sidebar (for _deleted folder)
+app.post('/api/tasks/:taskId/record-hidden', validateTaskId, (req, res) => {
+  const taskId = req.params.taskId;
+  const taskDir = path.join(OUT_DIR, taskId);
+  if (!fs.existsSync(taskDir)) {
+    return res.status(404).json({ error: 'Task not found' });
+  }
+  const status = readJSON(path.join(taskDir, 'status.json'));
+  recordDeletedFromSidebar(taskId, status || {});
+  res.json({ ok: true });
+});
+
+// POST /api/tasks/:taskId/runtime_overrides — D1: atomic write + max_attempts range [current_attempt, 50] (K7-1: READ_ONLY blocks)
+app.post('/api/tasks/:taskId/runtime_overrides', requireWritable, validateTaskId, (req, res) => {
   const taskId = req.params.taskId;
   const taskDir = path.join(OUT_DIR, taskId);
   if (!fs.existsSync(taskDir)) {
@@ -607,9 +690,20 @@ app.post('/api/tasks/:taskId/runtime_overrides', validateTaskId, (req, res) => {
     }
   }
 
-  // D1-1: Read old value for audit history
+  // D1-1: Read old value for audit history; E4-3: idempotency — same request_id already written → 200 + dedup, no write
   const overridesPath = path.join(taskDir, 'runtime_overrides.json');
   const oldPayload = readJSON(overridesPath);
+  if (oldPayload && oldPayload.request_id === request_id) {
+    auditLog({
+      actor: 'http',
+      source: 'http',
+      action: 'runtime_overrides',
+      task_id: taskId,
+      request_id,
+      dedup: true
+    });
+    return res.status(200).json({ ok: true, request_id, deduplicated: true });
+  }
 
   const payload = {
     overrides,
@@ -617,8 +711,25 @@ app.post('/api/tasks/:taskId/runtime_overrides', validateTaskId, (req, res) => {
     written_at: new Date().toISOString()
   };
 
-  // D1-1: Atomic write — temp → flush → fsync → rename (K1-3)
-  atomicWriteJSON(overridesPath, payload);
+  // D1-1: Atomic write — temp → flush → fsync → rename (K1-3). E4-4: on failure return WRITE_FAILED, audit, do not modify status.
+  try {
+    atomicWriteJSON(overridesPath, payload);
+  } catch (writeErr) {
+    auditLog({
+      actor: 'gui',
+      source: 'http',
+      action: 'runtime_overrides',
+      task_id: taskId,
+      request_id,
+      error: 'WRITE_FAILED',
+      message: writeErr.message
+    });
+    return res.status(500).json({
+      error: 'WRITE_FAILED',
+      message: 'Failed to write runtime_overrides. Status was not modified.',
+      request_id
+    });
+  }
 
   // Audit with old/new for rollback support (A5-0)
   auditLog({
@@ -647,8 +758,8 @@ app.post('/api/tasks/:taskId/runtime_overrides', validateTaskId, (req, res) => {
   res.json({ ok: true, request_id });
 });
 
-// POST /api/tasks/:taskId/user_input — append to user_input.jsonl + audit
-app.post('/api/tasks/:taskId/user_input', validateTaskId, (req, res) => {
+// POST /api/tasks/:taskId/user_input — append to user_input.jsonl + audit (K7-1: READ_ONLY blocks)
+app.post('/api/tasks/:taskId/user_input', requireWritable, validateTaskId, (req, res) => {
   const taskId = req.params.taskId;
   const taskDir = path.join(OUT_DIR, taskId);
   if (!fs.existsSync(taskDir)) {
@@ -725,12 +836,21 @@ app.get('/api/rubric/:task_type', (req, res) => {
       available: Object.keys(rubric.task_types || {})
     });
   }
+  // B4-3a: support dimensions as array of { dim_key, weight, is_hard_gate } or legacy [names] + weights + hard_gates
+  let dimensions = typeData.dimensions || [];
+  let weights = typeData.weights || {};
+  let hard_gates = typeData.hard_gates || [];
+  if (dimensions.length && typeof dimensions[0] === 'object' && dimensions[0] != null && 'dim_key' in dimensions[0]) {
+    dimensions = dimensions.map(d => d.dim_key);
+    weights = Object.fromEntries((typeData.dimensions || []).map(d => [d.dim_key, d.weight]));
+    hard_gates = (typeData.dimensions || []).filter(d => d.is_hard_gate).map(d => d.dim_key);
+  }
   res.json({
     task_type: resolved,
-    dimensions: typeData.dimensions || [],
-    weights: typeData.weights || {},
-    hard_gates: typeData.hard_gates || [],
-    gate_threshold: typeData.gate_threshold ?? 2.0,
+    dimensions,
+    weights,
+    hard_gates,
+    gate_threshold: typeData.gate_threshold ?? typeData.hard_gate_threshold ?? 2.0,
     penalty_rules: typeData.penalty_rules || []
   });
 });
@@ -765,6 +885,8 @@ function detectAdapters() {
       'mock_timeout': 'mock-timeout',
       'codex': 'codex-cli',
       'claude': 'claude-cli',
+      'claude_bridge': 'claude-cli',
+      'antigravity': 'antigravity-cli',
       'openai': 'openai-api',
       'moonshot': 'moonshot-api',
       'openrouter': 'openrouter-api'
@@ -773,13 +895,15 @@ function detectAdapters() {
 
     // A5-1: healthcheck
     const health = adapterHealthcheck(adapterName, role, scriptPath);
+    const supportLevel = health.support_level || (health.status === 'OK' ? 'SUPPORTED' : 'UNSUPPORTED');
     adapters.push({
       name: adapterName,
       type: role,
       script: file,
       status: health.status,
       reason: health.reason,
-      supports_ssh_headless: health.supports_ssh_headless
+      supports_ssh_headless: health.supports_ssh_headless,
+      support_level: supportLevel
     });
   }
 
@@ -789,73 +913,65 @@ function detectAdapters() {
 function adapterHealthcheck(name, role, scriptPath) {
   // Check if script file exists and is executable
   if (!fs.existsSync(scriptPath)) {
-    return { status: 'UNAVAILABLE', reason: 'script not found', supports_ssh_headless: false };
+    return { status: 'UNAVAILABLE', reason: 'script not found', supports_ssh_headless: false, support_level: 'UNSUPPORTED' };
   }
 
   const platform = os.platform();
 
   // Mock adapters are always available
   if (name.startsWith('mock')) {
-    return { status: 'OK', reason: null, supports_ssh_headless: true };
+    return { status: 'OK', reason: null, supports_ssh_headless: true, support_level: 'SUPPORTED' };
   }
 
-  // cursor-agent: Cursor execution via queue only (README ## Cursor execution); do not check cursor binary
+  // cursor-agent: via cliapi (cursorcliapi 8000), same API key as other adapters
   if (name === 'cursor-agent') {
-    const queueCliPath = path.resolve(COORDINATOR_LIB, '..', 'adapters', 'cursor_queue_cli.sh');
-    try {
-      fs.accessSync(queueCliPath, fs.X_OK);
-      return { status: 'OK', reason: null, supports_ssh_headless: true };
-    } catch {
-      return { status: 'UNAVAILABLE', reason: 'cursor_queue_cli.sh not found or not executable (see README ## Cursor execution)', supports_ssh_headless: true };
-    }
+    return { status: 'OK', reason: null, supports_ssh_headless: true, support_level: 'SUPPORTED' };
   }
 
-  // codex-cli: check codex binary only (auth is via CLI client, not API key)
+  // codex-cli: demo/PARTIAL per requirement (C1-1 / K8-5)
   if (name === 'codex-cli') {
     const exists = commandExists('codex');
     if (!exists) {
-      return { status: 'UNAVAILABLE', reason: 'missing binary: codex', supports_ssh_headless: true };
+      return { status: 'UNAVAILABLE', reason: 'missing binary: codex', supports_ssh_headless: true, support_level: 'PARTIAL' };
     }
-    return { status: 'OK', reason: null, supports_ssh_headless: true };
+    return { status: 'OK', reason: null, supports_ssh_headless: true, support_level: 'PARTIAL' };
   }
 
-  // claude-cli: check claude binary
+  // claude-cli: demo/PARTIAL per requirement (C1-1 / K8-5)
   if (name === 'claude-cli') {
-    const exists = commandExists('claude');
-    if (!exists) {
-      return { status: 'PARTIAL', reason: 'missing binary: claude', supports_ssh_headless: true };
-    }
-    if (!process.env.ANTHROPIC_API_KEY) {
-      return { status: 'PARTIAL', reason: 'missing key: ANTHROPIC_API_KEY', supports_ssh_headless: true };
-    }
-    return { status: 'OK', reason: null, supports_ssh_headless: true };
+    return { status: 'OK', reason: null, supports_ssh_headless: true, support_level: 'PARTIAL' };
   }
 
-  // openai-api: check key
+  // antigravity-cli: via CLIProxyAPI 8317; script exists and uses OPENCLAW_API_KEY/openclawaousers
+  if (name === 'antigravity-cli') {
+    return { status: 'OK', reason: null, supports_ssh_headless: true, support_level: 'SUPPORTED' };
+  }
+
+  // openai-api: check key — SUPPORTED for K8-5
   if (name === 'openai-api') {
     if (!process.env.OPENAI_API_KEY) {
-      return { status: 'UNAVAILABLE', reason: 'missing key: OPENAI_API_KEY', supports_ssh_headless: true };
+      return { status: 'UNAVAILABLE', reason: 'missing key: OPENAI_API_KEY', supports_ssh_headless: true, support_level: 'SUPPORTED' };
     }
-    return { status: 'OK', reason: null, supports_ssh_headless: true };
+    return { status: 'OK', reason: null, supports_ssh_headless: true, support_level: 'SUPPORTED' };
   }
 
   // moonshot-api: check key
   if (name === 'moonshot-api') {
     if (!process.env.MOONSHOT_API_KEY) {
-      return { status: 'UNAVAILABLE', reason: 'missing key: MOONSHOT_API_KEY', supports_ssh_headless: true };
+      return { status: 'UNAVAILABLE', reason: 'missing key: MOONSHOT_API_KEY', supports_ssh_headless: true, support_level: 'SUPPORTED' };
     }
-    return { status: 'OK', reason: null, supports_ssh_headless: true };
+    return { status: 'OK', reason: null, supports_ssh_headless: true, support_level: 'SUPPORTED' };
   }
 
   // openrouter-api: check key
   if (name === 'openrouter-api') {
     if (!process.env.OPENROUTER_API_KEY) {
-      return { status: 'UNAVAILABLE', reason: 'missing key: OPENROUTER_API_KEY', supports_ssh_headless: true };
+      return { status: 'UNAVAILABLE', reason: 'missing key: OPENROUTER_API_KEY', supports_ssh_headless: true, support_level: 'SUPPORTED' };
     }
-    return { status: 'OK', reason: null, supports_ssh_headless: true };
+    return { status: 'OK', reason: null, supports_ssh_headless: true, support_level: 'SUPPORTED' };
   }
 
-  return { status: 'UNKNOWN', reason: 'unrecognized adapter', supports_ssh_headless: false };
+  return { status: 'UNKNOWN', reason: 'unrecognized adapter', supports_ssh_headless: false, support_level: 'UNSUPPORTED' };
 }
 
 function commandExists(cmd) {
@@ -867,10 +983,38 @@ function commandExists(cmd) {
   }
 }
 
+// C1-1: ALLOW_PARTIAL_RUN — when false, PARTIAL adapters must not be selectable as default or for Run
+const ALLOW_PARTIAL_RUN = process.env.ALLOW_PARTIAL_RUN === 'true';
+
+// K7-1: READ_ONLY — when true, all write operations return 403
+const READ_ONLY = process.env.READ_ONLY === 'true';
+function requireWritable(req, res, next) {
+  if (READ_ONLY) {
+    return res.status(403).json({ error: 'READ_ONLY mode: writes are disabled' });
+  }
+  next();
+}
+
 app.get('/api/adapters', (req, res) => {
   try {
     const adapters = detectAdapters();
-    res.json({ adapters });
+    res.json({ adapters, allow_partial_run: ALLOW_PARTIAL_RUN });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Cliapi: provider -> models (for second-level model selector). API key: openclawaousers.
+app.get('/api/cliapi-providers', (req, res) => {
+  try {
+    if (!fs.existsSync(CLIAPI_PROVIDERS_PATH)) {
+      return res.json({ api_key_profile: 'openclawaousers', providers: {} });
+    }
+    const data = readJSON(CLIAPI_PROVIDERS_PATH);
+    res.json({
+      api_key_profile: data.api_key_profile || 'openclawaousers',
+      providers: data.providers || {}
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -892,21 +1036,31 @@ app.get('/api/config', (req, res) => {
     const cfg = readRdloopConfig();
     res.json({
       default_coder: cfg.default_coder || null,
-      default_judge: cfg.default_judge || null
+      default_judge: cfg.default_judge || null,
+      default_coder_model: cfg.default_coder_model || null,
+      default_judge_model: cfg.default_judge_model || null
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.put('/api/config', (req, res) => {
+app.put('/api/config', requireWritable, (req, res) => {
   try {
-    const { default_coder, default_judge } = req.body || {};
+    const { default_coder, default_judge, default_coder_model, default_judge_model } = req.body || {};
     const cfg = readRdloopConfig();
     if (default_coder !== undefined) cfg.default_coder = default_coder;
     if (default_judge !== undefined) cfg.default_judge = default_judge;
+    if (default_coder_model !== undefined) cfg.default_coder_model = default_coder_model;
+    if (default_judge_model !== undefined) cfg.default_judge_model = default_judge_model;
     atomicWriteJSON(RDLOOP_CONFIG_PATH, cfg);
-    res.json({ ok: true, default_coder: cfg.default_coder || null, default_judge: cfg.default_judge || null });
+    res.json({
+      ok: true,
+      default_coder: cfg.default_coder || null,
+      default_judge: cfg.default_judge || null,
+      default_coder_model: cfg.default_coder_model || null,
+      default_judge_model: cfg.default_judge_model || null
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1011,7 +1165,7 @@ app.get('/api/task_specs/:taskId', (req, res) => {
 });
 
 // POST /api/task_specs — create a new task spec (A2-2), A3 validation
-app.post('/api/task_specs', (req, res) => {
+app.post('/api/task_specs', requireWritable, (req, res) => {
   const { task_id, spec, target_dir } = req.body || {};
   if (!task_id || !validateTaskSpecId(task_id)) {
     return res.status(400).json({ error: 'Invalid or missing task_id' });
@@ -1061,7 +1215,7 @@ app.post('/api/task_specs', (req, res) => {
 });
 
 // PUT /api/task_specs/:taskId — update an existing task spec (A2-5), A3 validation
-app.put('/api/task_specs/:taskId', (req, res) => {
+app.put('/api/task_specs/:taskId', requireWritable, (req, res) => {
   const taskId = req.params.taskId;
   if (!validateTaskSpecId(taskId)) {
     return res.status(400).json({ error: 'Invalid task_id format' });
@@ -1097,7 +1251,7 @@ app.put('/api/task_specs/:taskId', (req, res) => {
 });
 
 // DELETE /api/task_specs/:taskId — soft-delete to trash/ (A2-4)
-app.delete('/api/task_specs/:taskId', (req, res) => {
+app.delete('/api/task_specs/:taskId', requireWritable, (req, res) => {
   const taskId = req.params.taskId;
   if (!validateTaskSpecId(taskId)) {
     return res.status(400).json({ error: 'Invalid task_id format' });
@@ -1127,7 +1281,7 @@ app.delete('/api/task_specs/:taskId', (req, res) => {
 });
 
 // POST /api/task_specs/:taskId/run — new instance: unique task_id per run (spec_id + timestamp) so sidebar shows each run
-app.post('/api/task_specs/:taskId/run', (req, res) => {
+app.post('/api/task_specs/:taskId/run', requireWritable, (req, res) => {
   const specTaskId = req.params.taskId;
   if (!validateTaskSpecId(specTaskId)) {
     return res.status(400).json({ error: 'Invalid task_id format' });
@@ -1178,7 +1332,7 @@ app.post('/api/task_specs/:taskId/run', (req, res) => {
 });
 
 // POST /api/task_specs/:taskId/copy — copy task spec with auto-rename (A2-3)
-app.post('/api/task_specs/:taskId/copy', (req, res) => {
+app.post('/api/task_specs/:taskId/copy', requireWritable, (req, res) => {
   const srcTaskId = req.params.taskId;
   if (!validateTaskSpecId(srcTaskId)) {
     return res.status(400).json({ error: 'Invalid task_id format' });
@@ -1217,6 +1371,116 @@ app.post('/api/task_specs/:taskId/copy', (req, res) => {
 
   auditLog({ action: 'task_spec_copy', src_task_id: srcTaskId, new_task_id: newId });
   res.json({ ok: true, task_id: newId, source_dir: path.basename(saveDir) });
+});
+
+// ============================================================
+// D1/D2: Prompt directory management
+// ============================================================
+
+// Validate prompt file name: only [A-Za-z0-9_.-]+.md, no path separators
+const VALID_PROMPT_NAME = /^[A-Za-z0-9_.\-]+\.md$/;
+function validatePromptName(name) {
+  return VALID_PROMPT_NAME.test(name) && !name.includes('..') && !name.includes('/') && !name.includes('\\');
+}
+
+// Atomic write for plain text files (D1/D2 — temp → fsync → rename)
+function atomicWriteText(filepath, content) {
+  const dir = path.dirname(filepath);
+  fs.mkdirSync(dir, { recursive: true });
+  const tmp = filepath + '.tmp.' + crypto.randomBytes(6).toString('hex');
+  const fd = fs.openSync(tmp, 'w');
+  try {
+    fs.writeSync(fd, content);
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fs.renameSync(tmp, filepath);
+  } catch (err) {
+    try { fs.closeSync(fd); } catch {}
+    try { fs.unlinkSync(tmp); } catch {}
+    throw err;
+  }
+}
+
+// GET /api/prompts — list all .md files in prompts/ (D1)
+app.get('/api/prompts', (req, res) => {
+  try {
+    let files = [];
+    try { files = fs.readdirSync(PROMPTS_DIR); } catch { /* dir not found */ }
+    const prompts = files
+      .filter(f => f.endsWith('.md') && validatePromptName(f))
+      .map(f => {
+        const fp = path.join(PROMPTS_DIR, f);
+        let size = 0, updated_at = null;
+        try {
+          const stat = fs.statSync(fp);
+          size = stat.size;
+          updated_at = stat.mtime.toISOString().replace(/\.\d{3}Z$/, 'Z');
+        } catch {}
+        return { name: f, size, updated_at };
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
+    res.json({ prompts });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/prompts/:name — read a prompt file (D1)
+app.get('/api/prompts/:name', (req, res) => {
+  const { name } = req.params;
+  if (!validatePromptName(name)) {
+    return res.status(400).json({ error: 'Invalid prompt file name' });
+  }
+  const filepath = path.resolve(PROMPTS_DIR, name);
+  // Path traversal check (D2)
+  if (!filepath.startsWith(PROMPTS_DIR + path.sep) && filepath !== PROMPTS_DIR) {
+    return res.status(400).json({ error: 'Path traversal denied' });
+  }
+  if (!fs.existsSync(filepath)) {
+    return res.status(404).json({ error: 'Prompt not found' });
+  }
+  try {
+    const content = fs.readFileSync(filepath, 'utf8');
+    let updated_at = null;
+    try { updated_at = fs.statSync(filepath).mtime.toISOString().replace(/\.\d{3}Z$/, 'Z'); } catch {}
+    res.json({ name, content, updated_at });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PUT /api/prompts/:name — save a prompt file (D1/D2). K7-1: READ_ONLY blocks; K7-2: overwrite confirmed by client.
+app.put('/api/prompts/:name', requireWritable, (req, res) => {
+  const { name } = req.params;
+  if (!validatePromptName(name)) {
+    return res.status(400).json({ error: 'Invalid prompt file name' });
+  }
+  const filepath = path.resolve(PROMPTS_DIR, name);
+  // Path traversal check (D2)
+  if (!filepath.startsWith(PROMPTS_DIR + path.sep) && filepath !== PROMPTS_DIR) {
+    return res.status(400).json({ error: 'Path traversal denied' });
+  }
+  const { content } = req.body;
+  if (typeof content !== 'string') {
+    return res.status(400).json({ error: 'content must be a string' });
+  }
+  // Backup existing file with timestamp (D1 optional versioning)
+  let backup_path = null;
+  if (fs.existsSync(filepath)) {
+    const ts = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').slice(0, 19);
+    backup_path = filepath + '.bak.' + ts;
+    try { fs.copyFileSync(filepath, backup_path); } catch { backup_path = null; }
+  }
+  try {
+    atomicWriteText(filepath, content);
+    auditLog({ action: 'prompt_save', name, size: content.length, backup: backup_path });
+    let updated_at = null;
+    try { updated_at = fs.statSync(filepath).mtime.toISOString().replace(/\.\d{3}Z$/, 'Z'); } catch {}
+    res.json({ ok: true, name, updated_at, backup: backup_path ? path.basename(backup_path) : null });
+  } catch (err) {
+    auditLog({ action: 'prompt_save_failed', name, error: err.message });
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.listen(PORT, () => {

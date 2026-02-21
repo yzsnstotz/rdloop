@@ -10,6 +10,8 @@
   "max_attempts": 3,
   "coder": "mock",
   "judge": "mock",
+  "coder_model": null,
+  "judge_model": null,
   "constraints": [],
   "created_at": "",
   "target_type": "external_repo",

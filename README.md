@@ -2,9 +2,16 @@
 
 Automated code review loop: **Coder (AI) → Test → Judge (AI) → Auto-retry (up to N times)**
 
+
+
 ## 30-Second Quick Verification
 
+
 ```bash
+
+# kill & start
+./restart-gui.sh
+
 cd ~/work/projects/rdloop
 
 # 1. Basic loop
@@ -54,7 +61,17 @@ rdloop/
 │   ├── public/               # Frontend (HTML/CSS/JS)
 │   └── package.json
 ├── out/                      # Runtime output (gitignored)
+│   ├── _default/             # Tasks with no task_type
+│   ├── requirements_doc/     # task_type=requirements_doc
+│   │   └── test/             # Test runs for requirements_doc
+│   └── engineering_impl/     # task_type=engineering_impl
 └── worktrees/                # Git worktrees (gitignored)
+```
+
+**Output layout by task type:** Run results are stored under `out/<task_id>/`. To classify by task type, use a `task_id` that includes the type and optional subfolder, e.g. `requirements_doc/test/run_001`. Ensure the directory structure exists with:
+
+```bash
+bash coordinator/ensure_out_structure.sh
 ```
 
 ## Running Examples
@@ -85,31 +102,12 @@ cd gui && npm install && npm start
 
 Features: task list, attempt details, timeline, Pause/Resume/RunNext controls, instruction editing.
 
-## Cursor execution (Claude / OpenClaw / ao users)
+## Cursor / Judge execution (cliapi)
 
-### 1) Single execution entry for Claude (copy-paste instruction)
+Cursor (coder/judge) and other adapters use **cliapi** (API key; no queue or worker):
 
-**From now on, do not call `cursor-agent` directly** (SSH triggers macOS Keychain Security 195/36). All Cursor execution must go through the queue CLI:
-
-```bash
-cd /Users/yzliu/work/projects/rdloop && ./coordinator/adapters/cursor_queue_cli.sh --id <ATTEMPT_ID> --timeout 600 "<PROMPT>"
-```
-
-- **stdout** = response; **process exit code** = rc.
-- Worker is already running and consumes `out/cursor_queue`, producing `out/cursor_out`.
-- Omit `--id` if you don’t need it.
-
-### 2) How OpenClaw / ao users should call rdloop
-
-- **ao users must not run `cursor-agent`.** They may only run rdloop CLI or `cursor_queue_cli.sh`, e.g.:
-
-```bash
-ssh local-yzliu 'cd /Users/yzliu/work/projects/rdloop && ./coordinator/adapters/cursor_queue_cli.sh "..."'
-```
-
-### 3) Timeout (optional hardening)
-
-The client-side `cursor_queue_cli.sh` already enforces a 600s timeout, so the worker can run without its own timeout. If you want to harden against hung processes later, you can either: `brew install coreutils` and use `gtimeout` in the worker, or add a small pure bash/Node timeout wrapper in rdloop.
+- **cursor-agent**: cursorcliapi at `http://127.0.0.1:8000/v1`, API key `openclawaousers`.
+- **codex-cli / claude-cli / antigravity-cli**: CLIProxyAPI at `http://127.0.0.1:8317/v1`. Ensure gateway is running; rdloop calls `/chat/completions`.
 
 ## Maintenance Commands
 
@@ -143,16 +141,20 @@ These four checks are validated by `coordinator/self_check.sh`:
 
 | Code | Category | Description |
 |------|----------|-------------|
-| PAUSED_CURSOR_MISSING | PAUSED_INFRA | Cursor CLI not in PATH |
 | PAUSED_CODEX_MISSING | PAUSED_INFRA | Codex CLI not in PATH |
 | PAUSED_CRASH | PAUSED_INFRA | Process crashed or killed |
 | PAUSED_NOT_GIT_REPO | PAUSED_INFRA | repo_path not a git repo |
 | PAUSED_TASK_ID_CONFLICT | PAUSED_INFRA | Duplicate task_id |
+| PAUSED_CODER_FAILED | PAUSED_INFRA | Coder step did not complete (rc≠0); test and judge skipped |
+| PAUSED_CODER_NO_OUTPUT | PAUSED_INFRA | Coder run.log too small; judge skipped (avoids judge on empty evidence) |
 | PAUSED_JUDGE_INVALID | PAUSED_JUDGE | Judge output invalid after retries |
 | PAUSED_JUDGE_TIMEOUT | PAUSED_JUDGE | Judge timed out after retries |
 | PAUSED_ALLOWED_PATHS | PAUSED_POLICY | File outside allowed paths |
 | PAUSED_FORBIDDEN_GLOBS | PAUSED_POLICY | File matches forbidden glob |
 | PAUSED_USER | PAUSED_MANUAL | User requested pause |
+| PAUSED_WAITING_USER_INPUT | PAUSED_MANUAL | Judge returned NEED_USER_INPUT (no auto-advance) |
+
+**Judge verdict and flow**: When the judge returns **FAIL** and attempts remain, the coordinator (via `decision_table`) sets `next_state: RUNNING` and `consume_attempt: true`, then continues to the next attempt without pausing. When the judge returns **NEED_USER_INPUT**, the task is **PAUSED** (e.g. `PAUSED_WAITING_USER_INPUT`); use GUI Resume or Run Next after providing input. So “pause” is not caused by FAIL — it is caused by user pause, infra issues, or judge asking for user input.
 
 ## Task Lifecycle
 

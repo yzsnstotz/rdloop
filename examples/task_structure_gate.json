@@ -1,0 +1,17 @@
+{
+  "task_id": "structure_gate",
+  "goal": "生成 artifacts/requirements.md 需求文档，包含固定标题 # 需求文档 及基本章节结构",
+  "acceptance": "artifacts/requirements.md 存在、非空、包含标题 # 需求文档；spec.json（可选）可 JSON parse",
+  "coder": "structure_gate",
+  "judge": "structure_gate",
+  "task_type": "requirements_doc",
+  "scoring_mode": "rubric_analytic",
+  "max_attempts": 2,
+  "repo_path": ".",
+  "base_ref": "HEAD",
+  "test_cmd": "true",
+  "coder_timeout_seconds": 30,
+  "judge_timeout_seconds": 30,
+  "test_timeout_seconds": 10,
+  "_comment": "K8-3 管道结构 Gate 任务。不依赖 LLM；Judge 仅做文件存在性与标题校验。用于 selfcheck_v1_1.sh 回归验证。"
+}

@@ -41,16 +41,22 @@ if [ -f "$instruction_path" ]; then
   instruction=$(cat "$instruction_path")
 fi
 
-# Call codex CLI in worktree (codex runs in cwd)
+# B1-4: No pipe for rc capture — run command with redirects, then write rc from $? (explicit capture)
+run_log="${attempt_dir}/coder/run.log"
 {
   echo "[CODER][codex] $(date -u +%Y-%m-%dT%H:%M:%SZ) Starting codex coder"
   echo "[CODER][codex] worktree: ${worktree_dir}"
   echo "[CODER][codex] codex_cmd: ${codex_cmd}"
-  cd "$worktree_dir"
-  echo "$instruction" | "$codex_cmd" 2>&1
+  cd "$worktree_dir" || exit 1
+  printf '%s' "$instruction" > "${attempt_dir}/coder/.instruction_tmp"
+  "$codex_cmd" < "${attempt_dir}/coder/.instruction_tmp" 2>&1
+  echo $? > "${attempt_dir}/coder/rc.txt"
   echo "[CODER][codex] $(date -u +%Y-%m-%dT%H:%M:%SZ) Codex coder finished"
-} > "${attempt_dir}/coder/run.log" 2>&1
-coder_rc=${PIPESTATUS[0]:-$?}
-
-echo "$coder_rc" > "${attempt_dir}/coder/rc.txt"
+  rm -f "${attempt_dir}/coder/.instruction_tmp"
+} > "$run_log" 2>&1
+if [ ! -f "${attempt_dir}/coder/rc.txt" ]; then
+  echo "1" > "${attempt_dir}/coder/rc.txt"
+fi
+coder_rc=$(cat "${attempt_dir}/coder/rc.txt" 2>/dev/null)
+coder_rc=${coder_rc:-1}
 exit "$coder_rc"

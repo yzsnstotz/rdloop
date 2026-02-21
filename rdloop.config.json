@@ -1,0 +1,6 @@
+{
+  "default_coder": "cursor-agent",
+  "default_judge": "codex-cli",
+  "default_coder_model": "",
+  "default_judge_model": ""
+}

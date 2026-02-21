@@ -26,7 +26,17 @@
       "Bash(node -e:*)",
       "Bash(curl:*)",
       "Bash(lsof:*)",
-      "Bash(xargs kill:*)"
+      "Bash(xargs kill:*)",
+      "Bash(cursor-agent:*)",
+      "Bash(codex --help:*)",
+      "Bash(codex exec:*)",
+      "Bash(env:*)",
+      "Bash(security list-keychains:*)",
+      "Bash(security unlock-keychain:*)",
+      "Bash(otool:*)",
+      "Bash(pgrep:*)",
+      "Bash(launchctl list:*)",
+      "Bash(git -C /Users/yzliu/work/projects/rdloop/worktrees/task_claude_openclaw_notify/attempt_001 diff --stat main...HEAD)"
     ]
   }
 }

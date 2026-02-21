@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# call_judge_cursor.sh — Cursor judge adapter via cliapi (cursorcliapi 8000)
+# call_judge_antigravity.sh — Antigravity (CLIProxyAPI 8317) judge adapter for rdloop
 # Interface: $1=task_json_path $2=evidence_json_path $3=out_attempt_dir $4=judge_prompt_path
 # Outputs: out_attempt_dir/judge/verdict.json
-# Uses OPENCLAW_API_KEY (openclawaousers), JUDGE_MODEL (default auto). No queue CLI.
 
 set -uo pipefail
 
@@ -13,7 +12,7 @@ judge_prompt_path="$4"
 
 mkdir -p "${out_attempt_dir}/judge"
 
-BASE_URL="${RDLOOP_CURSOR_CLIAPI_BASE_URL:-http://127.0.0.1:8000/v1}"
+BASE_URL="${RDLOOP_CLIAPI_BASE_URL:-http://127.0.0.1:8317/v1}"
 API_KEY="${OPENCLAW_API_KEY:-openclawaousers}"
 model="${JUDGE_MODEL:-}"
 if [ -z "$model" ]; then
@@ -21,9 +20,9 @@ if [ -z "$model" ]; then
 import json,sys
 try:
     with open('${task_json_path}') as f: d=json.load(f)
-    print(d.get('judge_model','auto'))
-except: print('auto')
-" 2>/dev/null || echo "auto")
+    print(d.get('judge_model','gemini-2.5-flash'))
+except: print('gemini-2.5-flash')
+" 2>/dev/null || echo "gemini-2.5-flash")
 fi
 
 system_content=""
@@ -33,6 +32,7 @@ user_content="---"
 
 payload=$(python3 -c "
 import json,sys
+# args: system_content, user_content, model (from stdin or env)
 s=sys.argv[1]
 u=sys.argv[2]
 m=sys.argv[3]
@@ -46,7 +46,7 @@ curl_rc=$?
 
 if [ "$curl_rc" -ne 0 ]; then
   cat > "${out_attempt_dir}/judge/verdict.json" <<'ENDJSON'
-{"schema_version":"v1","decision":"NEED_USER_INPUT","reasons":["Judge API request failed"],"next_instructions":"","questions_for_user":["Check cursorcliapi 8000 and OPENCLAW_API_KEY"]}
+{"schema_version":"v1","decision":"NEED_USER_INPUT","reasons":["Judge API request failed"],"next_instructions":"","questions_for_user":["Check CLIProxyAPI 8317 and OPENCLAW_API_KEY"]}
 ENDJSON
   echo "195" > "${out_attempt_dir}/judge/rc.txt"
   exit 195
@@ -63,6 +63,7 @@ obj=json.loads(m.group()) if m else None
 if obj and 'decision' in obj and 'reasons' in obj:
     print(json.dumps(obj, indent=2))
     sys.exit(0)
+# fallback
 print(json.dumps({'schema_version':'v1','decision':'NEED_USER_INPUT','reasons':['Could not extract verdict JSON'],'next_instructions':'','questions_for_user':['Judge response invalid']}, indent=2))
 sys.exit(0)
 " > "${out_attempt_dir}/judge/verdict.json" 2>/dev/null || true
