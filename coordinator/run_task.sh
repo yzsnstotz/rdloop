@@ -45,6 +45,9 @@ PREV_EFFECTIVE_MAX=""
 CONSECUTIVE_TIMEOUT_COUNT=0
 CONSECUTIVE_TIMEOUT_KEY=""
 
+# E5-2/K1-1a: last_user_input_ts_consumed — set after consume_user_input in run_attempt; passed to write_status
+LAST_USER_INPUT_TS_CONSUMED=""
+
 get_pause_category() {
   local code="$1"
   case "$code" in
@@ -52,7 +55,7 @@ get_pause_category() {
       echo "PAUSED_INFRA" ;;
     PAUSED_CODER_AUTH_195|PAUSED_JUDGE_AUTH_195)
       echo "PAUSED_INFRA" ;;
-    PAUSED_JUDGE_INVALID|PAUSED_JUDGE_TIMEOUT|PAUSED_JUDGE_VERDICT_INVALID|PAUSED_JUDGE_VERDICT_INCONSISTENT)
+    PAUSED_JUDGE_INVALID|PAUSED_JUDGE_TIMEOUT|PAUSED_JUDGE_VERDICT_INVALID|PAUSED_JUDGE_VERDICT_INCONSISTENT|PAUSED_JUDGE_MODE_INVALID)
       echo "PAUSED_JUDGE" ;;
     PAUSED_CODER_TIMEOUT|PAUSED_TEST_TIMEOUT)
       echo "PAUSED_TIMEOUT" ;;
@@ -118,11 +121,13 @@ maybe_bump_state_version() {
   PREV_EFFECTIVE_MAX="$eff_max"
 }
 
+# K1-1a: last_user_input_ts_consumed (optional) — pass null or ISO8601 string
 write_status() {
   local state="$1" cur_att="$2" max_att="$3" pflag="$4" last_dec="$5"
   local msg="$6" q_json="$7" pcat="$8" prcode="$9"
   shift 9
   local last_trans_json="${1:-null}"
+  local last_ui_ts="${2:-null}"
   maybe_bump_state_version "$state" "$prcode" "$last_dec" "$cur_att" "$EFFECTIVE_MAX_ATTEMPTS"
   local rubric_ver="null"
   [ -f "${TASK_JSON:-}" ] && rubric_ver=$(json_read "$TASK_JSON" "rubric_version" "null")
@@ -131,6 +136,10 @@ write_status() {
 import json,sys
 lt_raw=sys.argv[13]
 lt=json.loads(lt_raw) if lt_raw!="null" else None
+lui=None
+if len(sys.argv)>16:
+  lui_raw=sys.argv[16].strip()
+  if lui_raw and lui_raw!="null": lui=lui_raw
 d={"task_id":sys.argv[1],"state":sys.argv[2],"current_attempt":int(sys.argv[3]),
    "max_attempts":int(sys.argv[4]),"pause_flag":sys.argv[5]=="true",
    "last_decision":sys.argv[6],"message":sys.argv[7],
@@ -141,13 +150,13 @@ d={"task_id":sys.argv[1],"state":sys.argv[2],"current_attempt":int(sys.argv[3]),
    "effective_max_attempts":int(sys.argv[14]),
    "paths":{"status_json":"status.json"},
    "rubric_version_used":json.loads(sys.argv[15]),
-   "last_user_input_ts_consumed":None}
+   "last_user_input_ts_consumed":lui}
 if lt is not None: d["last_transition"]=lt
 print(json.dumps(d))
 ' "$TASK_ID" "$state" "$cur_att" "$max_att" "$pflag" \
   "$last_dec" "$msg" "$q_json" "$pcat" "$prcode" \
   "$(now_iso)" "$STATE_VERSION" "$last_trans_json" "$EFFECTIVE_MAX_ATTEMPTS" \
-  "$rubric_ver" \
+  "$rubric_ver" "$last_ui_ts" \
   | python3 "$ATOMIC_WRITE" "${TASK_DIR}/status.json" -
   # Write _index entry (A1-6)
   write_index_entry "$state"
@@ -192,6 +201,20 @@ e={"ts":sys.argv[1],"task_id":sys.argv[2],"attempt":int(sys.argv[3]) if sys.argv
 print(json.dumps(e))
 ' "$(now_iso)" "$TASK_ID" "$att" "$etype" "$summary" \
   "${TASK_DIR}" "$att_dir" "$wt_dir" "${TASK_DIR}/status.json" \
+  | python3 "$ATOMIC_WRITE" --append "${TASK_DIR}/events.jsonl" -
+}
+
+# K3-1/K3-5: ATTEMPT_DECIDED with decision, next_state, pause_reason_code, effective_max_attempts, current_attempt
+write_event_attempt_decided() {
+  local att="$1" decision="$2" next_state="$3" prcode="${4:-}"
+  python3 -c '
+import json,sys
+e={"ts":sys.argv[1],"task_id":sys.argv[2],"attempt":int(sys.argv[3]),
+   "type":"ATTEMPT_DECIDED",
+   "decision":sys.argv[4],"next_state":sys.argv[5],"pause_reason_code":sys.argv[6] if sys.argv[6] else None,
+   "effective_max_attempts":int(sys.argv[7]),"current_attempt":int(sys.argv[3])}
+print(json.dumps(e))
+' "$(now_iso)" "$TASK_ID" "$att" "$decision" "$next_state" "$prcode" "$EFFECTIVE_MAX_ATTEMPTS" \
   | python3 "$ATOMIC_WRITE" --append "${TASK_DIR}/events.jsonl" -
 }
 
@@ -445,16 +468,19 @@ act_on_decision() {
       local scoring_mode; scoring_mode=$(json_read "$TASK_JSON" "scoring_mode" "rubric_analytic")
       if [ "$scoring_mode" != "rubric_analytic" ]; then
         log_info "B4-0: scoring_mode=${scoring_mode} is not rubric_analytic; cannot pass K8 Gate"
+        write_event_attempt_decided "$att_num" "FAIL" "PAUSED" "PAUSED_JUDGE_MODE_INVALID"
         enter_paused "PAUSED_JUDGE_MODE_INVALID" "scoring_mode must be rubric_analytic to pass Gate (current: ${scoring_mode})" "[\"Set TaskSpec.scoring_mode to rubric_analytic for Gate.\"]"
         NORMAL_EXIT=1; exit 0
       fi
-      write_status "READY_FOR_REVIEW" "$att_num" "$max_att" "false" "$ld" "$msg" "$qj" "" ""
+      write_event_attempt_decided "$att_num" "$ld" "READY_FOR_REVIEW" ""
+      write_status "READY_FOR_REVIEW" "$att_num" "$max_att" "false" "$ld" "$msg" "$qj" "" "" "null" "${LAST_USER_INPUT_TS_CONSUMED:-}"
       write_final_summary "READY_FOR_REVIEW" "$ld" "$att_num" "$max_att" "$msg" "$qj" "" "" "$hc" "${final_score_for_summary:-}"
       write_event "$att_num" "STATE_CHANGED" "READY_FOR_REVIEW"
       NORMAL_EXIT=1; exit 0
       ;;
     FAILED)
-      write_status "FAILED" "$att_num" "$max_att" "false" "$ld" "$msg" "$qj" "" ""
+      write_event_attempt_decided "$att_num" "$ld" "FAILED" ""
+      write_status "FAILED" "$att_num" "$max_att" "false" "$ld" "$msg" "$qj" "" "" "null" "${LAST_USER_INPUT_TS_CONSUMED:-}"
       write_final_summary "FAILED" "$ld" "$att_num" "$max_att" "$msg" "$qj" "" "" "$hc" "${final_score_for_summary:-}"
       write_event "$att_num" "STATE_CHANGED" "FAILED"
       NORMAL_EXIT=1; exit 0
@@ -464,7 +490,8 @@ act_on_decision() {
       NORMAL_EXIT=1; exit 0
       ;;
     RUNNING)
-      write_status "RUNNING" "$att_num" "$max_att" "false" "$ld" "$msg" "$qj" "" ""
+      write_event_attempt_decided "$att_num" "$ld" "RUNNING" ""
+      write_status "RUNNING" "$att_num" "$max_att" "false" "$ld" "$msg" "$qj" "" "" "null" "${LAST_USER_INPUT_TS_CONSUMED:-}"
       log_info "Auto-advancing to attempt $(( att_num + 1 ))"
       return 0
       ;;
@@ -573,7 +600,7 @@ cleanup() {
     if [ "$cs" = "RUNNING" ] || [ -z "$cs" ]; then
       local ma="${EFFECTIVE_MAX_ATTEMPTS:-3}"
       [ ! -f "${TASK_DIR}/status.json" ] && {
-        write_status "RUNNING" "$CURRENT_ATTEMPT" "$ma" "false" "" "" '[]' "" ""
+        write_status "RUNNING" "$CURRENT_ATTEMPT" "$ma" "false" "" "" '[]' "" "" "null" ""
       }
       local crash_lt
       crash_lt=$(python3 -c '
@@ -586,7 +613,7 @@ print(json.dumps(d))
       write_status "PAUSED" "$CURRENT_ATTEMPT" "$ma" "false" \
         "NEED_USER_INPUT" "coordinator crashed or was killed (${sig_name}, rc=${exit_code})" \
         '["Please check logs and re-run with --continue"]' \
-        "PAUSED_INFRA" "PAUSED_CRASH" "$crash_lt"
+        "PAUSED_INFRA" "PAUSED_CRASH" "$crash_lt" "${LAST_USER_INPUT_TS_CONSUMED:-}"
       write_final_summary "PAUSED" "NEED_USER_INPUT" "$CURRENT_ATTEMPT" "$ma" \
         "coordinator crashed or was killed (${sig_name}, rc=${exit_code})" \
         '["Please check logs and re-run with --continue"]' \
@@ -614,7 +641,7 @@ check_control_pause() {
     write_status "PAUSED" "$CURRENT_ATTEMPT" "$ma" "true" \
       "" "paused at checkpoint: ${cpname}" \
       '["User requested PAUSE. Use --continue to resume."]' \
-      "PAUSED_MANUAL" "PAUSED_USER" "$lt_user"
+      "PAUSED_MANUAL" "PAUSED_USER" "$lt_user" "${LAST_USER_INPUT_TS_CONSUMED:-}"
     write_final_summary "PAUSED" "NEED_USER_INPUT" "$CURRENT_ATTEMPT" "$ma" \
       "paused at checkpoint: ${cpname}" \
       '["User requested PAUSE. Use --continue to resume."]' \
@@ -643,7 +670,7 @@ process_control() {
     PAUSE) return 0 ;;
     RESUME)
       local ma; ma=$(json_read "$TASK_JSON" "max_attempts" "3")
-      write_status "RUNNING" "$CURRENT_ATTEMPT" "$ma" "false" "" "" '[]' "" ""
+      write_status "RUNNING" "$CURRENT_ATTEMPT" "$ma" "false" "" "" '[]' "" "" "null" "${LAST_USER_INPUT_TS_CONSUMED:-}"
       rm -f "$cf"; [ -n "$nonce" ] && echo "$nonce" >> "$pf"
       write_event "$CURRENT_ATTEMPT" "STATE_CHANGED" "RESUMED via control"
       CONTROL_RESUME_APPLIED=1
@@ -672,6 +699,7 @@ process_control() {
 
 ##############################################################################
 # 6. PAUSED helper — always writes status + final_summary + event
+# K2-6: last_transition must include consume_attempt, reason_key, consecutive_count, triggered_at
 ##############################################################################
 enter_paused() {
   local rcode="$1" msg="$2" qjson="$3"
@@ -681,12 +709,17 @@ enter_paused() {
   local lt_json
   lt_json=$(python3 -c '
 import json,sys
-d={"reason_code":sys.argv[1],"previous_state":"RUNNING","message":sys.argv[2]}
-if sys.argv[3]!="0": d["consecutive_count"]=int(sys.argv[3]); d["reason_key"]=sys.argv[4]
+# K2-6: consume_attempt, reason_key, consecutive_count, triggered_at
+d={"consume_attempt":sys.argv[5]=="true","reason_key":sys.argv[1],"triggered_at":sys.argv[6]}
+if sys.argv[3]!="0": d["consecutive_count"]=int(sys.argv[3])
 print(json.dumps(d))
-' "$rcode" "$msg" "$CONSECUTIVE_TIMEOUT_COUNT" "$CONSECUTIVE_TIMEOUT_KEY")
+' "$rcode" "$msg" "$CONSECUTIVE_TIMEOUT_COUNT" "$CONSECUTIVE_TIMEOUT_KEY" "$consume" "$(now_iso)")
+  # ATTEMPT_DECIDED for PAUSED_JUDGE_MODE_INVALID is written by caller before enter_paused
+  if [ "$rcode" != "PAUSED_JUDGE_MODE_INVALID" ]; then
+    write_event_attempt_decided "$CURRENT_ATTEMPT" "$ldec" "PAUSED" "$rcode"
+  fi
   write_status "PAUSED" "$CURRENT_ATTEMPT" "$ma" "false" \
-    "$ldec" "$msg" "$qjson" "$cat" "$rcode" "$lt_json"
+    "$ldec" "$msg" "$qjson" "$cat" "$rcode" "$lt_json" "${LAST_USER_INPUT_TS_CONSUMED:-}"
   write_final_summary "PAUSED" "$ldec" "$CURRENT_ATTEMPT" "$ma" \
     "$msg" "$qjson" "$cat" "$rcode" "$hc"
   write_event "$CURRENT_ATTEMPT" "STATE_CHANGED" "$rcode"
@@ -843,7 +876,53 @@ build_instruction() {
     echo "=== ACCEPTANCE CRITERIA ==="
     echo "$acceptance"
   } > "$ifile"
+  # E5-2: Consume user_input.jsonl (incremental), append USER_INPUT block, set LAST_USER_INPUT_TS_CONSUMED
+  consume_user_input "$ifile"
   echo "$ifile"
+}
+
+# E5-2: Read user_input.jsonl (lines after last_user_input_ts_consumed), append to instruction file; set LAST_USER_INPUT_TS_CONSUMED
+consume_user_input() {
+  local ifile="$1"
+  [ -z "$ifile" ] || [ ! -f "$ifile" ] && return 0
+  local ui_file="${TASK_DIR}/user_input.jsonl"
+  [ ! -f "$ui_file" ] && return 0
+  local prev_ts=""
+  [ -f "${TASK_DIR}/status.json" ] && prev_ts=$(json_read "${TASK_DIR}/status.json" "last_user_input_ts_consumed" "" 2>/dev/null || echo "")
+  LAST_USER_INPUT_TS_CONSUMED=$(python3 -c "
+import json,sys,os
+ifile=sys.argv[1]
+ui_file=sys.argv[2]
+prev_ts=sys.argv[3].strip() if len(sys.argv)>3 else ''
+new_ts=prev_ts
+lines_added=[]
+try:
+  with open(ui_file, encoding='utf-8') as f:
+    for line in f:
+      line=line.strip()
+      if not line: continue
+      try:
+        ob=json.loads(line)
+        ts=ob.get('ts') or ob.get('timestamp') or ''
+        text=ob.get('text') or ob.get('content') or ''
+        if not ts: continue
+        if prev_ts and ts <= prev_ts: continue
+        lines_added.append((ts,text))
+        if not new_ts or ts > new_ts: new_ts=ts
+      except: pass
+  if lines_added:
+    with open(ifile, 'a', encoding='utf-8') as out:
+      out.write('\n\n=== USER_INPUT ===\n\n')
+      for ts, text in lines_added:
+        out.write(text)
+        if not text.endswith('\n'): out.write('\n')
+    print(new_ts)
+  else:
+    print(prev_ts if prev_ts else '')
+except Exception as e:
+  print(prev_ts if prev_ts else '')
+" "$ifile" "$ui_file" "$prev_ts" 2>/dev/null || echo "")
+  [ -z "$LAST_USER_INPUT_TS_CONSUMED" ] || export LAST_USER_INPUT_TS_CONSUMED
 }
 
 ##############################################################################
@@ -855,6 +934,8 @@ run_attempt() {
   local att_dir="${TASK_DIR}/attempt_${pad}"
   local cmd_log="${att_dir}/commands.log"
   CURRENT_ATTEMPT=$att_num
+  # E5-2/K1-1a: Load previous last_user_input_ts_consumed so write_status can pass it; consume_user_input may update it
+  [ -f "${TASK_DIR}/status.json" ] && LAST_USER_INPUT_TS_CONSUMED=$(json_read "${TASK_DIR}/status.json" "last_user_input_ts_consumed" "" 2>/dev/null || echo "")
 
   local repo base_ref goal acceptance test_cmd coder_type judge_type
   local coder_timeout test_timeout judge_timeout max_att
@@ -901,7 +982,7 @@ run_attempt() {
   mkdir -p "${att_dir}/coder" "${att_dir}/test" "${att_dir}/git" "${att_dir}/judge"
 
   local att_start; att_start=$(now_iso)
-  write_status "RUNNING" "$att_num" "$max_att" "false" "" "" '[]' "" ""
+  write_status "RUNNING" "$att_num" "$max_att" "false" "" "" '[]' "" "" "null" "${LAST_USER_INPUT_TS_CONSUMED:-}"
   write_event "$att_num" "ATTEMPT_STARTED" "attempt ${att_num} started" "$att_dir"
 
   # Worktree
@@ -1281,7 +1362,7 @@ cmd_reset() {
   local ma=3; [ -f "$TASK_JSON" ] && ma=$(json_read "$TASK_JSON" "max_attempts" "3")
   local lt_reset='{"reason_code":"PAUSED_USER","previous_state":"RUNNING","message":"task reset"}'
   write_status "PAUSED" "0" "$ma" "false" "NEED_USER_INPUT" "reset performed" \
-    '["Task has been reset. Use --continue or create new task."]' "PAUSED_MANUAL" "PAUSED_USER" "$lt_reset"
+    '["Task has been reset. Use --continue or create new task."]' "PAUSED_MANUAL" "PAUSED_USER" "$lt_reset" ""
   write_final_summary "PAUSED" "NEED_USER_INPUT" "0" "$ma" "reset performed" \
     '["Task has been reset. Use --continue or create new task."]' "PAUSED_MANUAL" "PAUSED_USER" ""
   write_event "0" "TASK_RESET" "task reset performed"
@@ -1348,12 +1429,12 @@ with open(sys.argv[4],'w') as f: json.dump(d,f,indent=2)
 ensure_status_on_lock_fail() {
   if [ ! -f "${TASK_DIR}/status.json" ]; then
     local ma=3; [ -f "${TASK_JSON:-}" ] && ma=$(json_read "$TASK_JSON" "max_attempts" "3")
-    write_status "RUNNING" "0" "$ma" "false" "" "" '[]' "" ""
+    write_status "RUNNING" "0" "$ma" "false" "" "" '[]' "" "" "null" ""
   fi
   local ma; ma=$(json_read "${TASK_DIR}/status.json" "max_attempts" "3")
   local ca; ca=$(json_read "${TASK_DIR}/status.json" "current_attempt" "0")
   local st; st=$(json_read "${TASK_DIR}/status.json" "state" "RUNNING")
-  write_status "$st" "$ca" "$ma" "false" "" "already running" '[]' "" ""
+  write_status "$st" "$ca" "$ma" "false" "" "already running" '[]' "" "" "null" ""
 }
 
 ##############################################################################
@@ -1406,7 +1487,7 @@ with open(sys.argv[1],'w') as f: json.dump(d,f,indent=2)
   local ma; ma=$(json_read "$TASK_JSON" "max_attempts" "3")
   EFFECTIVE_MAX_ATTEMPTS="$ma"
   load_runtime_overrides
-  write_status "RUNNING" "0" "$EFFECTIVE_MAX_ATTEMPTS" "false" "" "" '[]' "" ""
+  write_status "RUNNING" "0" "$EFFECTIVE_MAX_ATTEMPTS" "false" "" "" '[]' "" "" "null" ""
   write_event "0" "TASK_CREATED" "task created from ${sf}"
 
   if ! acquire_lock; then
@@ -1468,7 +1549,7 @@ cmd_continue() {
   fi
   local nxt=$(( mx + 1 ))
   if [ "$nxt" -le "$EFFECTIVE_MAX_ATTEMPTS" ]; then
-    write_status "RUNNING" "$CURRENT_ATTEMPT" "$EFFECTIVE_MAX_ATTEMPTS" "false" "" "" '[]' "" ""
+    write_status "RUNNING" "$CURRENT_ATTEMPT" "$EFFECTIVE_MAX_ATTEMPTS" "false" "" "" '[]' "" "" "null" "${LAST_USER_INPUT_TS_CONSUMED:-}"
     local att=$nxt
     while [ "$att" -le "$EFFECTIVE_MAX_ATTEMPTS" ]; do
       process_control; load_runtime_overrides; run_attempt "$att"; att=$(( att + 1 ))

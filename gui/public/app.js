@@ -117,13 +117,13 @@ async function loadTasks() {
   if (items.length === 0) {
     let msg = 'No tasks found.<br>Run examples/run_hello.sh first.';
     if (allItems.length > 0) {
-      msg = `${allItems.length} task(s) in total; all have been removed from the list.`;
+      msg = escapeHtml(String(allItems.length)) + ' task(s) in total; all have been removed from the list.';
     }
     list.innerHTML = `<div style="padding:16px;color:#8b949e">${msg}</div>`;
     return;
   }
   list.innerHTML = `
-    ${hiddenCount > 0 ? `<div style="padding:8px 12px 4px;font-size:11px;color:#8b949e">${hiddenCount} removed from list</div>` : ''}
+    ${hiddenCount > 0 ? `<div style="padding:8px 12px 4px;font-size:11px;color:#8b949e">${escapeHtml(String(hiddenCount))} removed from list</div>` : ''}
     ${items.map(t => `
     <div class="task-item ${t.task_id === currentTaskId ? 'active' : ''}"
          onclick="selectTask('${escapeHtml(t.task_id)}')">
@@ -752,14 +752,18 @@ async function loadRubric(taskType) {
   }
 }
 
-// A5: Build adapter (provider) selector HTML — single dropdown. Only show cliapi providers (no mock, no direct-CLI-only).
-// C1-1: when !cachedAllowPartialRun, exclude PARTIAL adapters from default and Run selection.
+// A5: Build adapter selector — show all detected adapters except mock* and unavailable.
+// Always include codex-cli and claude-cli as options (user-configured). C1-1: when !cachedAllowPartialRun, exclude other PARTIAL adapters.
 function buildAdapterSelectorOnly(role, selectedName) {
-  const cliapiNames = Object.keys(cachedCliapiProviders || {});
-  let adapters = (cachedAdapters || []).filter(a => a.type === role && cliapiNames.includes(a.name));
-  if (!cachedAllowPartialRun) {
-    adapters = adapters.filter(a => a.support_level !== 'PARTIAL');
-  }
+  const isMock = (name) => ['mock', 'mock-timeout', 'mock_need_input'].includes(name);
+  const alwaysInclude = (name) => name === 'codex-cli' || name === 'claude-cli';
+  let adapters = (cachedAdapters || []).filter(a => {
+    if (a.type !== role) return false;
+    if (isMock(a.name)) return false;
+    if (a.status !== 'OK' && !alwaysInclude(a.name)) return false;
+    if (!cachedAllowPartialRun && a.support_level === 'PARTIAL' && !alwaysInclude(a.name)) return false;
+    return true;
+  });
   if (adapters.length === 0) {
     return `<select id="adapter-${role}" class="form-select" onchange="refreshModelSelector('${role}')"><option value="">Loading...</option></select>`;
   }
@@ -1425,7 +1429,7 @@ async function loadPrompts() {
       return;
     }
     list.innerHTML = data.map(p => `
-      <div class="sidebar-item" onclick="viewPrompt(${JSON.stringify(escapeHtml(p.name))})" style="cursor:pointer">
+      <div class="sidebar-item" onclick="viewPrompt(${JSON.stringify(p.name)})" style="cursor:pointer">
         <span style="flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${escapeHtml(p.name)}">${escapeHtml(p.name)}</span>
         <span style="font-size:10px;color:#8b949e;margin-left:4px">${escapeHtml(String(Math.round((p.size||0)/1024*10)/10))}KB</span>
       </div>`).join('');

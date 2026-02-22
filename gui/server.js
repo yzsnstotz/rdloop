@@ -75,6 +75,11 @@ function readFile(filepath, maxLines) {
   } catch { return null; }
 }
 
+// K1-5: Current time in second-level UTC Z (for runtime_overrides.updated_at)
+function nowSecZ() {
+  return new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+
 // E1-1: Normalize updated_at to second-level UTC Z (K1-5)
 function normalizeUpdatedAt(ts) {
   if (ts == null || ts === '') return ts;
@@ -233,7 +238,7 @@ app.get('/api/tasks', (req, res) => {
 });
 
 // Task instance routes: allow taskId with slashes (e.g. requirements_doc/test/run_001)
-// GET /api/tasks/:id/events — events with tail support (5.2)
+// GET /api/tasks/:id/events — events with tail support (5.2); K4-2: since_offset / since_ts (v1.2 optional)
 app.get('/api/tasks/:taskId/events', validateTaskId, (req, res) => {
   const taskId = req.params.taskId;
   const taskDir = path.join(OUT_DIR, taskId);
@@ -241,7 +246,16 @@ app.get('/api/tasks/:taskId/events', validateTaskId, (req, res) => {
     return res.status(404).json({ error: 'Task not found' });
   }
   const tail = req.query.tail ? parseInt(req.query.tail, 10) : undefined;
-  const events = readEvents(path.join(taskDir, 'events.jsonl'), tail);
+  const sinceOffset = req.query.since_offset != null ? parseInt(req.query.since_offset, 10) : undefined;
+  const sinceTs = req.query.since_ts;
+  let events = readEvents(path.join(taskDir, 'events.jsonl'), tail);
+  if (typeof sinceOffset === 'number' && sinceOffset >= 0) {
+    events = events.slice(sinceOffset);
+  }
+  if (sinceTs && typeof sinceTs === 'string' && sinceTs.trim()) {
+    const ts = sinceTs.trim();
+    events = events.filter(e => e.ts && String(e.ts) > ts);
+  }
   res.json({ events });
 });
 
@@ -705,10 +719,13 @@ app.post('/api/tasks/:taskId/runtime_overrides', requireWritable, validateTaskId
     return res.status(200).json({ ok: true, request_id, deduplicated: true });
   }
 
+  // E4-3/K1-5: task_id, updated_at (sec Z), actor; use updated_at not written_at
   const payload = {
     overrides,
     request_id,
-    written_at: new Date().toISOString()
+    task_id: taskId,
+    updated_at: nowSecZ(),
+    actor: { source: 'http', id: 'gui' }
   };
 
   // D1-1: Atomic write — temp → flush → fsync → rename (K1-3). E4-4: on failure return WRITE_FAILED, audit, do not modify status.
@@ -803,6 +820,29 @@ app.post('/api/tasks/:taskId/user_input', requireWritable, validateTaskId, (req,
     fs.fsyncSync(fd);
   } finally {
     fs.closeSync(fd);
+  }
+
+  // K3-4: Append USER_INPUT_RECEIVED to events.jsonl (source, author, len)
+  const eventsPath = path.join(taskDir, 'events.jsonl');
+  const userInputEvent = {
+    ts: entry.ts,
+    task_id: taskId,
+    type: 'USER_INPUT_RECEIVED',
+    source: 'http',
+    author: 'gui',
+    len: text.length,
+    request_id
+  };
+  try {
+    const evFd = fs.openSync(eventsPath, 'a');
+    try {
+      fs.writeSync(evFd, JSON.stringify(userInputEvent) + '\n');
+      fs.fsyncSync(evFd);
+    } finally {
+      fs.closeSync(evFd);
+    }
+  } catch (evErr) {
+    // best effort; do not fail the request
   }
 
   auditLog({

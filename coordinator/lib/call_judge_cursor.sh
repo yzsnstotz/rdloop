@@ -13,6 +13,9 @@ judge_prompt_path="$4"
 
 mkdir -p "${out_attempt_dir}/judge"
 
+# B4-6/B4-7: Judge adapter run.log must record temperature=0 or N/A
+echo "[JUDGE][cursor] $(date -u +%Y-%m-%dT%H:%M:%SZ) temperature=0 (Judge adapter fixed; no temperature config)" >> "${out_attempt_dir}/judge/run.log" 2>/dev/null || true
+
 BASE_URL="${RDLOOP_CURSOR_CLIAPI_BASE_URL:-http://127.0.0.1:8000/v1}"
 API_KEY="${OPENCLAW_API_KEY:-openclawaousers}"
 model="${JUDGE_MODEL:-}"

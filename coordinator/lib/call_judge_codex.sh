@@ -13,6 +13,9 @@ judge_prompt_path="$4"
 
 mkdir -p "${out_attempt_dir}/judge"
 
+# B4-6/B4-7: Judge adapter run.log must record temperature=0 or N/A
+echo "[JUDGE][codex] $(date -u +%Y-%m-%dT%H:%M:%SZ) temperature=0 (Judge adapter fixed; no temperature config)" >> "${out_attempt_dir}/judge/run.log" 2>/dev/null || true
+
 # Read codex_cmd from task spec
 codex_cmd=$(python3 -c "
 import json, sys

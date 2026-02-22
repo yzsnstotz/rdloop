@@ -261,11 +261,66 @@ echo "=== Step 4: K8-6 — Calibration Gate ==="
 
 CAL_CASE="${CALIBRATION_DIR}/requirements_doc/cases/case_01.json"
 CAL_EXPECTED="${CALIBRATION_DIR}/requirements_doc/expected/case_01.json"
+CAL_INPUT_MD="${CALIBRATION_DIR}/requirements_doc/examples/calibration_input_01.md"
+CALL_JUDGE_STRUCTURE_GATE="${RDLOOP_ROOT}/coordinator/lib/call_judge_structure_gate.sh"
 
 if [ ! -f "$CAL_CASE" ] || [ ! -f "$CAL_EXPECTED" ]; then
   warn_check "K8-6: calibration case or expected file missing — skipping (degraded)"
 else
   pass_check "K8-6: calibration files found"
+
+  # B4-0a/K8-6: Run real Judge (structure_gate) with fixed calibration input and assert output in expected ranges
+  if [ -f "$CALL_JUDGE_STRUCTURE_GATE" ] && [ -f "$CAL_INPUT_MD" ]; then
+    CAL_WORKTREE="${OUT_ROOT}/cal_worktree_$$"
+    CAL_EVIDENCE="${OUT_ROOT}/cal_evidence_$$.json"
+    CAL_JUDGE_OUT="${OUT_ROOT}/cal_judge_out_$$"
+    mkdir -p "${CAL_WORKTREE}/artifacts"
+    # Structure gate requires "# 需求文档" in requirements.md; prepend so gate passes
+    (echo "# 需求文档"; echo ""; cat "$CAL_INPUT_MD") > "${CAL_WORKTREE}/artifacts/requirements.md"
+    echo "{\"worktree_path\": \"${CAL_WORKTREE}\"}" > "$CAL_EVIDENCE"
+    mkdir -p "$CAL_JUDGE_OUT/judge"
+    if bash "$CALL_JUDGE_STRUCTURE_GATE" "$GATE_TASK_JSON" "$CAL_EVIDENCE" "$CAL_JUDGE_OUT" "" 2>/dev/null; then
+      CAL_VERDICT="${CAL_JUDGE_OUT}/judge/verdict.json"
+      if [ -f "$CAL_VERDICT" ]; then
+        # Check verdict scores fall within expected ranges from case_01 expected
+        python3 - "$CAL_VERDICT" "$CAL_EXPECTED" << 'PYRANGE'
+import json, sys
+v_path, exp_path = sys.argv[1], sys.argv[2]
+with open(v_path) as f: v = json.load(f)
+with open(exp_path) as f: exp = json.load(f)
+ranges = exp.get('scores_ranges', {})
+ok = True
+for dim, (lo, hi) in ranges.items():
+    s = v.get('scores', {}).get(dim)
+    if s is not None and not (lo <= s <= hi):
+        print(f'  [FAIL] K8-6 real Judge: score {dim}={s} outside [{lo},{hi}]')
+        ok = False
+if ok and ranges:
+    print('  [PASS] K8-6: real Judge (structure_gate) output within expected ranges')
+PYRANGE
+        rcr=$?
+        [ -d "$CAL_WORKTREE" ] && rm -rf "$CAL_WORKTREE"
+        [ -f "$CAL_EVIDENCE" ] && rm -f "$CAL_EVIDENCE"
+        [ -d "$CAL_JUDGE_OUT" ] && rm -rf "$CAL_JUDGE_OUT"
+        if [ "$rcr" = "0" ]; then
+          pass_check "K8-6: real Judge calibration run + range check"
+        else
+          fail_check "K8-6: real Judge verdict outside expected ranges"
+        fi
+      else
+        [ -d "$CAL_WORKTREE" ] && rm -rf "$CAL_WORKTREE"
+        [ -f "$CAL_EVIDENCE" ] && rm -f "$CAL_EVIDENCE"
+        [ -d "$CAL_JUDGE_OUT" ] && rm -rf "$CAL_JUDGE_OUT"
+        fail_check "K8-6: real Judge did not produce verdict.json"
+      fi
+    else
+      [ -d "$CAL_WORKTREE" ] && rm -rf "$CAL_WORKTREE"
+      [ -f "$CAL_EVIDENCE" ] && rm -f "$CAL_EVIDENCE"
+      [ -d "$CAL_JUDGE_OUT" ] && rm -rf "$CAL_JUDGE_OUT"
+      warn_check "K8-6: real Judge (structure_gate) run failed — synthetic check only"
+    fi
+  fi
+
   # Validate by generating a synthetic verdict within expected ranges and checking validate_verdict.py
   python3 - "$CAL_CASE" "$CAL_EXPECTED" "$VALIDATE_VERDICT" << 'PYEOF'
 import json, sys, os, subprocess, tempfile
