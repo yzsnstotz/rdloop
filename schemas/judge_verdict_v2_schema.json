@@ -108,22 +108,16 @@
     },
     "top_issues": {
       "type": "array",
-      "items": {
-        "type": "string",
-        "maxLength": 120
-      },
+      "items": { "type": "string" },
       "minItems": 2,
       "maxItems": 5,
-      "description": "2..5 key issues, each max 120 chars"
+      "description": "2..5 key issues"
     },
     "fix_suggestions": {
       "type": "array",
-      "items": {
-        "type": "string",
-        "maxLength": 160
-      },
+      "items": { "type": "string" },
       "maxItems": 5,
-      "description": "Up to 5 fix suggestions, each max 160 chars"
+      "description": "Up to 5 fix suggestions"
     },
     "scoring_mode_used": {
       "type": "string",

@@ -1,0 +1,14 @@
+{
+  "schema_version": "v1",
+  "task_id": "mode_invalid_20260222_154411",
+  "repo_path": ".",
+  "base_ref": "main",
+  "goal": "mode invalid test",
+  "acceptance": "n/a",
+  "test_cmd": "true",
+  "max_attempts": 2,
+  "task_type": "requirements_doc",
+  "coder": "structure_gate",
+  "judge": "structure_gate",
+  "scoring_mode": "holistic_impression"
+}

@@ -55,9 +55,15 @@ ENDJSON
   exit 195
 fi
 
-echo "$resp" | python3 -c "
+resp_path=$(mktemp)
+printf '%s' "$resp" > "$resp_path"
+python3 - "$resp_path" <<'PYEOF' > "${out_attempt_dir}/judge/verdict.json" 2>/dev/null || true
 import json,sys,re
-raw=sys.stdin.read()
+raw=''
+try:
+    raw=open(sys.argv[1], encoding='utf-8').read()
+except Exception:
+    pass
 try: d=json.loads(raw)
 except: d={}
 content=d.get('choices',[{}])[0].get('message',{}).get('content','') or d.get('error',{}).get('message','')
@@ -68,6 +74,9 @@ if obj and 'decision' in obj and 'reasons' in obj:
     sys.exit(0)
 print(json.dumps({'schema_version':'v1','decision':'NEED_USER_INPUT','reasons':['Could not extract verdict JSON'],'next_instructions':'','questions_for_user':['Judge response invalid']}, indent=2))
 sys.exit(0)
-" > "${out_attempt_dir}/judge/verdict.json" 2>/dev/null || true
+PYEOF
+rm -f "$resp_path"
+[ -n "${JUDGE_STDOUT_PATH:-}" ] && [ ! -f "${JUDGE_STDOUT_PATH}" ] && : > "${JUDGE_STDOUT_PATH}"
+[ -n "${JUDGE_STDERR_PATH:-}" ] && [ ! -f "${JUDGE_STDERR_PATH}" ] && : > "${JUDGE_STDERR_PATH}"
 echo "0" > "${out_attempt_dir}/judge/rc.txt"
 exit 0

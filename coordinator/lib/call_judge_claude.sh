@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# call_judge_antigravity.sh — Antigravity (CLIProxyAPI 8317) judge adapter for rdloop
+# call_judge_claude.sh — Claude (CLIProxyAPI 8317) judge adapter for rdloop
 # Interface: $1=task_json_path $2=evidence_json_path $3=out_attempt_dir $4=judge_prompt_path
 # Outputs: out_attempt_dir/judge/verdict.json
 
@@ -13,7 +13,7 @@ judge_prompt_path="$4"
 mkdir -p "${out_attempt_dir}/judge"
 
 # B4-6/B4-7: Judge adapter run.log must record temperature=0 or N/A
-echo "[JUDGE][antigravity] $(date -u +%Y-%m-%dT%H:%M:%SZ) temperature=0 (Judge adapter fixed; no temperature config)" >> "${out_attempt_dir}/judge/run.log" 2>/dev/null || true
+echo "[JUDGE][claude] $(date -u +%Y-%m-%dT%H:%M:%SZ) temperature=0 (Judge adapter fixed; no temperature config)" >> "${out_attempt_dir}/judge/run.log" 2>/dev/null || true
 
 BASE_URL="${RDLOOP_CLIAPI_BASE_URL:-http://127.0.0.1:8317/v1}"
 API_KEY="${OPENCLAW_API_KEY:-openclawaousers}"
@@ -23,9 +23,9 @@ if [ -z "$model" ]; then
 import json,sys
 try:
     with open('${task_json_path}') as f: d=json.load(f)
-    print(d.get('judge_model','gemini-2.5-flash'))
-except: print('gemini-2.5-flash')
-" 2>/dev/null || echo "gemini-2.5-flash")
+    print(d.get('judge_model','claude-sonnet-4-6'))
+except: print('claude-sonnet-4-6')
+" 2>/dev/null || echo "claude-sonnet-4-6")
 fi
 
 system_content=""

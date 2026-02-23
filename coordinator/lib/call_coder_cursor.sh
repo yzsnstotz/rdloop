@@ -61,9 +61,16 @@ print(json.dumps({'model':'${model}','messages':[{'role':'user','content':inst}]
     exit 195
   fi
   # On non-2xx or missing choices, write enough context so run.log is actionable and meets size threshold
-  echo "$resp" | python3 -c "
+  resp_path=$(mktemp)
+  printf '%s' "$resp" > "$resp_path"
+  python3 - "$resp_path" "$http_code" <<'PYEOF'
 import json,sys
-raw=sys.stdin.read()
+raw = ''
+try:
+    raw = open(sys.argv[1], encoding='utf-8').read()
+except Exception:
+    pass
+http_code = sys.argv[2]
 try:
     d=json.loads(raw)
     c=d.get('choices',[{}])[0].get('message',{}).get('content','')
@@ -72,17 +79,24 @@ try:
     else:
         err=d.get('error',{})
         msg=err.get('message', str(d)[:500]) if isinstance(err, dict) else str(d)[:500]
-        print('[CODER][cursor] API returned no content. HTTP_CODE=' + '''${http_code}''' + '. Error: ' + str(msg)[:800])
+        print('[CODER][cursor] API returned no content. HTTP_CODE=' + str(http_code) + '. Error: ' + str(msg)[:800])
         print('[CODER][cursor] Raw response (first 1200 chars):')
         print(raw[:1200])
 except Exception as e:
     print('Parse error:', str(e))
-    print('[CODER][cursor] HTTP_CODE=' + '''${http_code}''')
+    print('[CODER][cursor] HTTP_CODE=' + str(http_code))
     print('Raw response (first 1200 chars):')
     print(raw[:1200])
-" 2>/dev/null || { echo "[CODER][cursor] HTTP_CODE=${http_code}"; echo "$resp"; }
+PYEOF
+  py_rc=$?
+  rm -f "$resp_path"
+  [ "$py_rc" = "0" ] || { echo "[CODER][cursor] HTTP_CODE=${http_code}"; echo "$resp"; }
   echo "[CODER][cursor] $(date -u +%Y-%m-%dT%H:%M:%SZ) Finished"
 } > "$run_log" 2>&1
+if [ -n "${CODER_STDOUT_PATH:-}" ] && [ "${CODER_STDOUT_PATH}" != "$run_log" ]; then
+  cp "$run_log" "${CODER_STDOUT_PATH}" 2>/dev/null || true
+fi
+[ -n "${CODER_STDERR_PATH:-}" ] && [ ! -f "${CODER_STDERR_PATH}" ] && : > "${CODER_STDERR_PATH}"
 if grep -q "Parse error:\|curl failed\|API returned no content" "$run_log" 2>/dev/null; then
   echo "195" > "${attempt_dir}/coder/rc.txt"
   exit 195

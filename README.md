@@ -109,6 +109,8 @@ Cursor (coder/judge) and other adapters use **cliapi** (API key; no queue or wor
 - **cursor-agent**: cursorcliapi at `http://127.0.0.1:8000/v1`, API key `openclawaousers`.
 - **codex-cli / claude-cli / antigravity-cli**: CLIProxyAPI at `http://127.0.0.1:8317/v1`. Ensure gateway is running; rdloop calls `/chat/completions`.
 
+**Local vs SSH:** The coordinator calls the cliapi gateway on the **machine where `run_task.sh` runs**. If you previously ran via Cursor’s SSH bridge, the gateway may have been available in that context; when you run **locally on mac-mini**, something must be listening on `127.0.0.1:8000` on mac-mini (e.g. Cursor open on mac-mini with cliapi, or a standalone gateway). Otherwise you get **rc=195** (authentication failed). See [docs/TROUBLESHOOTING-RC195.md](docs/TROUBLESHOOTING-RC195.md).
+
 ## Maintenance Commands
 
 ```bash

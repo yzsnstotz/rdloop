@@ -125,8 +125,7 @@ async function loadTasks() {
   list.innerHTML = `
     ${hiddenCount > 0 ? `<div style="padding:8px 12px 4px;font-size:11px;color:#8b949e">${escapeHtml(String(hiddenCount))} removed from list</div>` : ''}
     ${items.map(t => `
-    <div class="task-item ${t.task_id === currentTaskId ? 'active' : ''}"
-         onclick="selectTask('${escapeHtml(t.task_id)}')">
+    <div class="task-item ${t.task_id === currentTaskId ? 'active' : ''}" data-task-id="${escapeHtml(t.task_id)}">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:4px">
         <div style="min-width:0;flex:1">
           <div class="task-id">${escapeHtml(t.task_id)}</div>
@@ -270,6 +269,7 @@ function updateTaskMeta(data) {
 
 // Select and load task (full render only on task change)
 async function selectTask(taskId) {
+  if (!taskId || typeof taskId !== 'string') return;
   const needsFullRender = (taskId !== currentTaskId);
   currentTaskId = taskId;
   currentAttempt = null;
@@ -277,14 +277,24 @@ async function selectTask(taskId) {
   // Reset etags on task change
   if (needsFullRender) liveLogEtag = {};
 
-  const data = await api(`/task/${taskId}`);
-
-  if (needsFullRender) {
-    renderTask(data);
-  } else {
-    updateTaskMeta(data);
+  const content = document.getElementById('content');
+  try {
+    const data = await api(`/task/${encodeURIComponent(taskId)}`);
+    if (data && data.error) {
+      if (content) content.innerHTML = `<div class="empty-state" style="padding:24px"><h2>${escapeHtml(taskId)}</h2><p style="color:#f85149">${escapeHtml(data.error)}</p></div>`;
+      content.className = '';
+      loadTasks();
+      return;
+    }
+    if (needsFullRender) {
+      renderTask(data);
+    } else {
+      updateTaskMeta(data);
+    }
+  } catch (e) {
+    if (content) content.innerHTML = `<div class="empty-state" style="padding:24px"><h2>${escapeHtml(taskId)}</h2><p style="color:#f85149">Failed to load: ${escapeHtml(e.message || String(e))}</p></div>`;
+    content.className = '';
   }
-
   loadTasks(); // refresh active state in sidebar
 }
 
@@ -316,7 +326,7 @@ function renderTask(data) {
       </div>
     </div>
 
-    ${s.questions_for_user && s.questions_for_user.length > 0 ? `
+    ${Array.isArray(s.questions_for_user) && s.questions_for_user.length > 0 ? `
       <div style="background:#d2992233;border:1px solid #d29922;border-radius:8px;padding:12px;margin-bottom:16px">
         <strong>Questions for user:</strong>
         <ul style="margin-top:8px;padding-left:20px">
@@ -330,7 +340,13 @@ function renderTask(data) {
       <button class="btn btn-primary write-action" ${(s.state === 'RUNNING') ? 'disabled' : ''} onclick="doResume()" title="Resume and start coordinator">Resume</button>
       <button class="btn btn-primary write-action" ${(s.state === 'RUNNING') ? 'disabled' : ''} onclick="doRunNext()" title="Set RUN_NEXT and start coordinator (when PAUSED)">Run Next</button>
       <button class="btn btn-warn write-action" onclick="doForceRun()" title="Start coordinator ignoring lock (only if task is stuck)">Force Run</button>
+      ${(s.state === 'PAUSED') ? `<button class="btn btn-primary write-action" onclick="openAdjustParamsModal()" title="Edit instance params (goal, repo_path, max_attempts) then run">Adjust params &amp; Run</button>` : ''}
       <button class="btn write-action" onclick="openUserInputModal()" title="E5/E5-2: Insert user input (written to user_input.jsonl; coordinator consumes on next run)">Insert user input</button>
+    </div>
+    <div id="controls-help" style="font-size:11px;color:#8b949e;margin-top:6px;margin-bottom:8px">
+      <strong>Resume</strong>: 将状态设为 RUNNING 并启动 coordinator（一键恢复并运行）。 &nbsp;
+      <strong>Run Next</strong>: 任务为 PAUSED 时，设置 RUN_NEXT 并启动 coordinator，从当前 attempt 继续执行。 &nbsp;
+      <strong>Force Run</strong>: 忽略运行锁直接启动 coordinator，仅当任务卡住时使用。
     </div>
 
     <!-- B1: Live Log Panel with tab persistence -->
@@ -583,6 +599,94 @@ async function submitUserInput() {
   }
 }
 
+// Adjust params & Run: for PAUSED task — edit goal, repo_path, max_attempts then save and run
+async function openAdjustParamsModal() {
+  if (!currentTaskId) return;
+  const old = document.getElementById('adjust-params-modal');
+  if (old) old.remove();
+  let task = {};
+  let overrides = {};
+  try {
+    const data = await api(`/task/${currentTaskId}`);
+    task = data.task || {};
+    const ov = await api(`/task/${currentTaskId}/runtime_overrides`);
+    overrides = ov.overrides || {};
+  } catch (e) {
+    alert('Failed to load task: ' + (e?.message || String(e)));
+    return;
+  }
+  const maxAttempts = overrides.max_attempts ?? task.max_attempts ?? 3;
+  const modalHtml = `
+    <div id="adjust-params-modal" class="modal-overlay" onclick="if(event.target===this)closeAdjustParamsModal()">
+      <div class="modal-box" style="max-width:560px">
+        <h3 style="margin-top:0">Adjust params &amp; Run</h3>
+        <p style="font-size:12px;color:#8b949e;margin-bottom:12px">Edit instance params for this run, then run. Only available when task is PAUSED.</p>
+        <label class="form-label" style="font-size:11px">goal</label>
+        <textarea id="adjust-goal" class="form-input" rows="3" placeholder="Task goal">${escapeHtml((task.goal || ''))}</textarea>
+        <label class="form-label" style="font-size:11px;margin-top:8px">repo_path</label>
+        <input type="text" id="adjust-repo-path" class="form-input" value="${escapeHtml(task.repo_path || '')}" placeholder="/path/to/repo">
+        <label class="form-label" style="font-size:11px;margin-top:8px">max_attempts (1–50)</label>
+        <input type="number" id="adjust-max-attempts" class="form-input" min="1" max="50" value="${escapeHtml(String(maxAttempts))}">
+        <div id="adjust-params-msg" style="font-size:12px;margin-top:8px;color:#f85149"></div>
+        <div style="margin-top:12px;display:flex;gap:8px">
+          <button class="btn btn-primary write-action" onclick="submitAdjustParamsAndRun()">Save &amp; Run Next</button>
+          <button class="btn" onclick="closeAdjustParamsModal()">Cancel</button>
+        </div>
+      </div>
+    </div>`;
+  document.body.insertAdjacentHTML('beforeend', modalHtml);
+  updateReadOnlyBanner();
+}
+
+function closeAdjustParamsModal() {
+  const modal = document.getElementById('adjust-params-modal');
+  if (modal) modal.remove();
+}
+
+async function submitAdjustParamsAndRun() {
+  if (!currentTaskId) return;
+  const msgEl = document.getElementById('adjust-params-msg');
+  if (msgEl) msgEl.textContent = '';
+  const goal = (document.getElementById('adjust-goal')?.value ?? '').trim();
+  const repoPath = (document.getElementById('adjust-repo-path')?.value ?? '').trim();
+  const maxAttemptsRaw = document.getElementById('adjust-max-attempts')?.value;
+  const maxAttempts = maxAttemptsRaw ? Math.max(1, Math.min(50, parseInt(maxAttemptsRaw, 10))) : undefined;
+  if (maxAttempts !== undefined && (isNaN(maxAttempts) || maxAttempts < 1 || maxAttempts > 50)) {
+    if (msgEl) msgEl.textContent = 'max_attempts must be 1–50';
+    return;
+  }
+  try {
+    const patch = {};
+    if (goal !== undefined) patch.goal = goal;
+    if (repoPath !== undefined) patch.repo_path = repoPath || undefined;
+    if (maxAttempts !== undefined) patch.max_attempts = maxAttempts;
+    if (Object.keys(patch).length) {
+      const res = await fetch(`/api/task/${encodeURIComponent(currentTaskId)}/task_json`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch)
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        if (msgEl) msgEl.textContent = data.error || 'Failed to update task';
+        return;
+      }
+    }
+    if (maxAttempts !== undefined) {
+      const requestId = 'gui-adjust-' + Date.now() + '-' + Math.random().toString(36).slice(2, 10);
+      await fetch(`/api/tasks/${encodeURIComponent(currentTaskId)}/runtime_overrides`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ overrides: { max_attempts: maxAttempts }, request_id: requestId })
+      });
+    }
+    closeAdjustParamsModal();
+    await doRunNext();
+  } catch (e) {
+    if (msgEl) msgEl.textContent = e?.message || 'Request failed';
+  }
+}
+
 // ================================================================
 // A2: Task Spec CRUD — list, new, edit, copy, delete
 // A4: task_type + rubric_thresholds
@@ -799,14 +903,26 @@ function buildAdapterSelector(role, selectedProvider, selectedModel) {
     </div>`;
 }
 
-// When provider changes: show/hide model dropdown and repopulate options
-function refreshModelSelector(role) {
+// When provider changes: show/hide model dropdown and repopulate options. Fetches live models from gateway when provider has base_url.
+async function refreshModelSelector(role) {
   const provEl = document.getElementById(`adapter-${role}`);
   const wrapEl = document.getElementById(`${role}-model-wrap`);
   const modelEl = document.getElementById(`adapter-${role}-model`);
   if (!provEl || !wrapEl || !modelEl) return;
   const provider = provEl.value || '';
-  const models = (cachedCliapiProviders[provider] && cachedCliapiProviders[provider].models) || [];
+  const staticProvider = cachedCliapiProviders[provider];
+  const hasBaseUrl = staticProvider && staticProvider.base_url;
+  let models = (staticProvider && staticProvider.models) || [];
+  if (hasBaseUrl && provider) {
+    try {
+      const result = await api(`/cliapi-providers/${encodeURIComponent(provider)}/models`);
+      if (Array.isArray(result.models) && result.models.length > 0) {
+        models = result.models;
+      }
+    } catch (_) {
+      // keep static list on fetch error
+    }
+  }
   if (models.length === 0) {
     wrapEl.style.display = 'none';
     modelEl.innerHTML = '<option value="">— default —</option>';
@@ -1070,6 +1186,8 @@ async function openNewSpecModal() {
 
   document.body.insertAdjacentHTML('beforeend', modalHtml);
   updateReadOnlyBanner();
+  refreshModelSelector('coder').catch(() => {});
+  refreshModelSelector('judge').catch(() => {});
 
   // Store templates for use in applyTemplate
   window._specTemplates = TEMPLATES;
@@ -1093,8 +1211,8 @@ function applyTemplate() {
   if (coderEl && tpl.coder) coderEl.value = tpl.coder;
   const judgeEl = document.getElementById('adapter-judge');
   if (judgeEl && tpl.judge) judgeEl.value = tpl.judge;
-  refreshModelSelector('coder');
-  refreshModelSelector('judge');
+  refreshModelSelector('coder').catch(() => {});
+  refreshModelSelector('judge').catch(() => {});
   const coderModelEl = document.getElementById('adapter-coder-model');
   if (coderModelEl && tpl.coder_model) coderModelEl.value = tpl.coder_model;
   const judgeModelEl = document.getElementById('adapter-judge-model');
@@ -1310,6 +1428,8 @@ async function openEditSpecModal(taskId) {
 
   document.body.insertAdjacentHTML('beforeend', modalHtml);
   updateReadOnlyBanner();
+  refreshModelSelector('coder').catch(() => {});
+  refreshModelSelector('judge').catch(() => {});
 }
 
 // A2-5: Save edited spec
@@ -1567,6 +1687,19 @@ setInterval(refreshLiveLog, 3000);
 
 // Refresh task meta periodically (separate from log refresh)
 setInterval(refreshCurrentTaskMeta, 5000);
+
+// Task list click delegation (survives 2s refresh; works for RUNNING/PAUSED/completed)
+(function () {
+  const list = document.getElementById('task-list');
+  if (!list) return;
+  list.addEventListener('click', function (e) {
+    if (e.target.closest('button.write-action')) return;
+    const row = e.target.closest('.task-item');
+    if (!row) return;
+    const taskId = row.dataset.taskId;
+    if (taskId) selectTask(taskId);
+  });
+})();
 
 // Initial load (K7-1: load health for read_only first so banner and button state are correct)
 loadHealth().then(() => { loadTasks(); renderSpecsSection(); renderPromptsSection(); updateReadOnlyBanner(); });

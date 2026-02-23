@@ -1,0 +1,44 @@
+{
+  "schema_version": "v1",
+  "task_id": "ai_voice_agent_jp_mvp",
+  "repo_path": "out/requirements_doc/calljp/",
+  "base_ref": "main",
+  "goal": "产出并维护「AI 语音代打电话工具」日本落地 MVP 的完整产品需求文档（PRD）：面向在日华人种子用户（日本在华驾驶学习微信群约 1000 人），通过文字采集诉求与背景、AI 仿真人语音致电指定对象完成咨询/订座/购物等、并以用户授权方式（文字/语音/电话/短信/邮件）反馈结果；文档需包含商业成功视角、产品闭环、单案内记忆设计，以及外部接入需求、信息与工具许可（需人为处理）的清单与教程引导。",
+  "acceptance": "产出一份完整 PRD 文档，涵盖：产品愿景与日本始发站及扩散路径；种子用户与 MVP 场景（咨询、订座等）；端到端功能（文字采集、AI 外呼、结果反馈、单案记忆）；切实可行的产品闭环（用户侧、运营侧、商业侧）；外部接入与合规清单（电信/语音/AI/存储/微信等）及需人为处理项；docs/external-setup 与 docs/compliance 的教程与引导说明。PRD 存于 tasks/ai_voice_agent_jp_mvp_prd.md；可选地补充 docs 下教程骨架。",
+  "test_cmd": "true",
+  "max_attempts": 3,
+  "coder": "antigravity-cli",
+  "judge": "antigravity-cli",
+  "constraints": [
+    "本任务为需求与设计文档产出，不实现具体系统代码",
+    "外部依赖与合规描述须可操作（清单化、可勾选、可对应到教程）",
+    "代码与配置中的变量名、字段名、注释须使用英文；PRD 业务描述与面向用户的文案可使用中文"
+  ],
+  "created_at": "2026-02-24T00:00:00Z",
+  "target_type": "external_repo",
+  "allowed_paths": [],
+  "forbidden_globs": [
+    "**/.env",
+    "**/secrets*",
+    "**/*.pem"
+  ],
+  "cursor_cmd": "cursor",
+  "codex_cmd": "codex",
+  "coder_timeout_seconds": 600,
+  "judge_timeout_seconds": 300,
+  "test_timeout_seconds": 300,
+  "task_type": "requirements_doc",
+  "scoring_mode": "rubric_analytic",
+  "rubric_thresholds": {
+    "clarity": 3,
+    "completeness": 3,
+    "acceptance_testability": 3,
+    "risk_and_exception": 3,
+    "constraints_and_compliance": 3,
+    "feasibility": 3,
+    "structure_and_readability": 3,
+    "min_score": 50
+  },
+  "coder_model": "gemini-2.5-flash",
+  "judge_model": "gemini-2.5-flash"
+}

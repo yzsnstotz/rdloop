@@ -75,18 +75,21 @@ test.describe('K4-1: ETag / 304 live log', () => {
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify([{ task_id: FAKE_TASK_ID, state: 'RUNNING', attempt: 1 }]),
+      body: JSON.stringify({ items: [{ task_id: FAKE_TASK_ID, state: 'RUNNING', attempt: 1 }], next_cursor: null }),
       });
     });
-    await page.route(`**/api/task/${FAKE_TASK_ID}/status`, async route => {
+    await page.route(`**/api/task/${FAKE_TASK_ID}`, async route => {
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ task_id: FAKE_TASK_ID, state: 'RUNNING', attempt: 1 }),
+        body: JSON.stringify({
+          task: { task_id: FAKE_TASK_ID },
+          status: { task_id: FAKE_TASK_ID, state: 'RUNNING', current_attempt: 1 },
+          final_summary: null,
+          attempts: [],
+          timeline: []
+        }),
       });
-    });
-    await page.route(`**/api/task/${FAKE_TASK_ID}/attempts`, async route => {
-      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([]) });
     });
     await page.route('**/api/task_specs*', async route => {
       await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([]) });
@@ -145,18 +148,21 @@ test.describe('K4-1: ETag / 304 live log', () => {
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify([{ task_id: FAKE_TASK_ID, state: 'RUNNING', attempt: 1 }]),
+        body: JSON.stringify({ items: [{ task_id: FAKE_TASK_ID, state: 'RUNNING', attempt: 1 }], next_cursor: null }),
       });
     });
-    await page.route(`**/api/task/${FAKE_TASK_ID}/status`, async route => {
+    await page.route(`**/api/task/${FAKE_TASK_ID}`, async route => {
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ task_id: FAKE_TASK_ID, state: 'RUNNING', attempt: 1 }),
+        body: JSON.stringify({
+          task: { task_id: FAKE_TASK_ID },
+          status: { task_id: FAKE_TASK_ID, state: 'RUNNING', current_attempt: 1 },
+          final_summary: null,
+          attempts: [],
+          timeline: []
+        }),
       });
-    });
-    await page.route(`**/api/task/${FAKE_TASK_ID}/attempts`, async route => {
-      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([]) });
     });
     await page.route('**/api/task_specs*', async route => {
       await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([]) });
@@ -212,18 +218,21 @@ test.describe('K4-1: ETag / 304 live log', () => {
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify([{ task_id: FAKE_TASK_ID, state: 'RUNNING', attempt: 1 }]),
+        body: JSON.stringify({ items: [{ task_id: FAKE_TASK_ID, state: 'RUNNING', attempt: 1 }], next_cursor: null }),
       });
     });
-    await page.route(`**/api/task/${FAKE_TASK_ID}/status`, async route => {
+    await page.route(`**/api/task/${FAKE_TASK_ID}`, async route => {
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ task_id: FAKE_TASK_ID, state: 'RUNNING', attempt: 1 }),
+        body: JSON.stringify({
+          task: { task_id: FAKE_TASK_ID },
+          status: { task_id: FAKE_TASK_ID, state: 'RUNNING', current_attempt: 1 },
+          final_summary: null,
+          attempts: [],
+          timeline: []
+        }),
       });
-    });
-    await page.route(`**/api/task/${FAKE_TASK_ID}/attempts`, async route => {
-      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([]) });
     });
     await page.route('**/api/task_specs*', async route => {
       await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([]) });

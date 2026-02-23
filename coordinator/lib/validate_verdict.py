@@ -179,7 +179,7 @@ def validate_v2_structural(data):
     elif penalty < 0 or penalty > 2 or (penalty * 2) != int(penalty * 2):
         errors.append("penalty = %s must be in [0, 2] step 0.5" % penalty)
 
-    # top_issues: 2..5 items, each max 120 chars
+    # top_issues: 2..5 items (no length limit in code; prompt may still suggest brevity)
     top_issues = data["top_issues"]
     if not isinstance(top_issues, list):
         errors.append("top_issues must be an array")
@@ -189,10 +189,8 @@ def validate_v2_structural(data):
         for i, item in enumerate(top_issues):
             if not isinstance(item, str):
                 errors.append("top_issues[%d] must be a string" % i)
-            elif len(item) > 120:
-                errors.append("top_issues[%d] exceeds 120 chars (%d)" % (i, len(item)))
 
-    # fix_suggestions: max 5 items, each max 160 chars
+    # fix_suggestions: max 5 items (no length limit in code)
     fix_suggestions = data["fix_suggestions"]
     if not isinstance(fix_suggestions, list):
         errors.append("fix_suggestions must be an array")
@@ -202,8 +200,6 @@ def validate_v2_structural(data):
         for i, item in enumerate(fix_suggestions):
             if not isinstance(item, str):
                 errors.append("fix_suggestions[%d] must be a string" % i)
-            elif len(item) > 160:
-                errors.append("fix_suggestions[%d] exceeds 160 chars (%d)" % (i, len(item)))
 
     # weights sum ~= 1.0 (tolerance 0.01)
     if isinstance(weights, dict) and all(isinstance(v, (int, float)) for v in weights.values()):

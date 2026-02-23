@@ -7,7 +7,9 @@ const os = require('os');
 
 const app = express();
 const PORT = 17333;
-const OUT_DIR = path.resolve(__dirname, '..', 'out');
+const OUT_DIR = process.env.RDLOOP_OUT_DIR
+  ? path.resolve(process.env.RDLOOP_OUT_DIR)
+  : path.resolve(__dirname, '..', 'out');
 const COORDINATOR = path.resolve(__dirname, '..', 'coordinator', 'run_task.sh');
 const TASKS_DIR = path.resolve(__dirname, '..', 'tasks');
 const EXAMPLES_DIR = path.resolve(__dirname, '..', 'examples');
@@ -17,6 +19,28 @@ const PROMPTS_DIR = path.resolve(__dirname, '..', 'prompts');
 const RDLOOP_CONFIG_PATH = path.resolve(__dirname, '..', 'rdloop.config.json');
 const CLIAPI_PROVIDERS_PATH = path.resolve(__dirname, '..', 'config', 'cliapi_providers.json');
 const WORKTREES_DIR = path.resolve(__dirname, '..', 'worktrees');
+const RDLOOP_ROOT = path.resolve(__dirname, '..');
+
+// Ensure repo_path directory exists when saving task spec (create if missing, no error)
+function ensureRepoPathExists(repoPath) {
+  if (!repoPath || typeof repoPath !== 'string') return;
+  const trimmed = repoPath.trim();
+  if (!trimmed) return;
+  let absPath;
+  if (path.isAbsolute(trimmed)) {
+    absPath = path.normalize(trimmed);
+  } else {
+    absPath = path.normalize(path.join(RDLOOP_ROOT, trimmed));
+  }
+  // Only create if under RDLOOP_ROOT or OUT_DIR to avoid creating arbitrary system paths
+  const underRoot = absPath === RDLOOP_ROOT || (absPath.startsWith(RDLOOP_ROOT + path.sep));
+  const underOut = absPath === OUT_DIR || (absPath.startsWith(OUT_DIR + path.sep));
+  if (underRoot || underOut) {
+    try {
+      if (!fs.existsSync(absPath)) fs.mkdirSync(absPath, { recursive: true });
+    } catch (err) { /* ignore; coordinator may still fail later with not a git repo */ }
+  }
+}
 
 // Env for coordinator so cursor-agent/codex are found (GUI may run with minimal PATH)
 function getCoordinatorEnv() {
@@ -39,6 +63,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 // Helper: validate taskId — alphanumeric, underscore, hyphen only (C0-2)
 const VALID_TASK_ID = /^[A-Za-z0-9_-]+$/;
+const TASK_LIST_ID = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 function isValidTaskId(taskId) {
   return typeof taskId === 'string' && VALID_TASK_ID.test(taskId);
 }
@@ -93,6 +118,10 @@ function normalizeUpdatedAt(ts) {
     if (!isNaN(d.getTime())) return d.toISOString().replace(/\.\d{3}Z$/, 'Z');
   } catch {}
   return ts;
+}
+
+function isSecUtcZ(ts) {
+  return typeof ts === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(ts);
 }
 
 // Helper: read events.jsonl with half-line tolerance (K3-6)
@@ -174,25 +203,32 @@ app.get('/api/tasks', (req, res) => {
     const cursor = cursorStr ? decodeCursor(cursorStr) : null;
 
     const dirs = fs.readdirSync(OUT_DIR).filter(d => {
-      if (!isValidTaskId(d)) return false;
+      if (!TASK_LIST_ID.test(d)) return false;
+      if (d.startsWith('_')) return false;
       const p = path.join(OUT_DIR, d);
       try { return fs.statSync(p).isDirectory(); } catch { return false; }
     });
 
     let tasks = dirs.map(taskId => {
       const status = readJSON(path.join(OUT_DIR, taskId, 'status.json'));
+      if (!status) return null;
       const rawState = status?.state || 'UNKNOWN';
       const state = normalizeState(rawState);
+      const updatedAt = normalizeUpdatedAt(status?.updated_at);
+      if (!isSecUtcZ(updatedAt)) {
+        console.warn(`[api/tasks] skip task=${taskId}: invalid updated_at=${JSON.stringify(status?.updated_at)}`);
+        return null;
+      }
       return {
         task_id: taskId,
         state,
         current_attempt: status?.current_attempt || 0,
         last_decision: status?.last_decision || '',
         message: status?.message || '',
-        updated_at: normalizeUpdatedAt(status?.updated_at) || '',
+        updated_at: updatedAt,
         _rank: stateRank(state)
       };
-    });
+    }).filter(Boolean);
 
     // Sort: state_rank ASC, updated_at DESC, task_id ASC
     tasks.sort((a, b) => {
@@ -284,7 +320,7 @@ app.get('/api/task/:taskId', validateTaskId, (req, res) => {
     for (const dir of entries) {
       const attDir = path.join(taskDir, dir);
       const testRc = readFile(path.join(attDir, 'test', 'rc.txt'));
-      const diffStat = readFile(path.join(attDir, 'git', 'diff.stat'));
+      const diffStat = readFile(path.join(attDir, 'diff.stat')) || readFile(path.join(attDir, 'git', 'diff.stat'));
       const verdict = readJSON(path.join(attDir, 'judge', 'verdict.json'));
       attempts.push({
         name: dir,
@@ -336,11 +372,11 @@ function resolveLiveLogPath(taskDir, logName) {
       const runLog = path.join(roleDir, 'run.log');
       const stdoutLog = path.join(roleDir, 'stdout.log');
       const stderrLog = path.join(roleDir, 'stderr.log');
-      if (fs.existsSync(runLog)) return runLog;
       const parts = [];
       if (fs.existsSync(stdoutLog)) { const c = readFile(stdoutLog); if (c) parts.push(c); }
       if (fs.existsSync(stderrLog)) { const c = readFile(stderrLog); if (c) parts.push(c); }
       if (parts.length) return { synthetic: parts.join('\n--- stderr ---\n') };
+      if (fs.existsSync(runLog)) return runLog;
       const oldNames = role === 'coder'
         ? [path.join(roleDir, 'cursor_stdout.log'), path.join(roleDir, 'cursor_stderr.log')]
         : [path.join(roleDir, 'codex_stderr.log')];
@@ -560,6 +596,58 @@ app.post('/api/task/:taskId/run', requireWritable, validateTaskId, (req, res) =>
   child.unref();
 
   res.json({ ok: true, pid: child.pid });
+});
+
+// GET /api/task/:taskId/runtime_overrides — read current overrides for instance (e.g. adjust params modal)
+app.get('/api/task/:taskId/runtime_overrides', validateTaskId, (req, res) => {
+  const taskId = req.params.taskId;
+  const taskDir = path.join(OUT_DIR, taskId);
+  if (!fs.existsSync(taskDir)) {
+    return res.status(404).json({ error: 'Task not found' });
+  }
+  const overridesPath = path.join(taskDir, 'runtime_overrides.json');
+  const payload = readJSON(overridesPath);
+  res.json({ overrides: payload?.overrides ?? {}, request_id: payload?.request_id ?? null });
+});
+
+// PUT /api/task/:taskId/task_json — patch task.json for a run instance (only when PAUSED; for adjust params & re-run)
+app.put('/api/task/:taskId/task_json', requireWritable, validateTaskId, (req, res) => {
+  const taskId = req.params.taskId;
+  const taskDir = path.join(OUT_DIR, taskId);
+  if (!fs.existsSync(taskDir)) {
+    return res.status(404).json({ error: 'Task not found' });
+  }
+  const status = readJSON(path.join(taskDir, 'status.json'));
+  if (status?.state !== 'PAUSED') {
+    return res.status(400).json({ error: 'Only PAUSED tasks can have task_json updated. Pause the task first.' });
+  }
+  const taskPath = path.join(taskDir, 'task.json');
+  const current = readJSON(taskPath);
+  if (!current) {
+    return res.status(500).json({ error: 'Failed to read task.json' });
+  }
+  const allowed = ['goal', 'acceptance', 'repo_path', 'base_ref', 'max_attempts', 'test_cmd', 'coder', 'judge', 'coder_model', 'judge_model'];
+  const patch = req.body && typeof req.body === 'object' ? req.body : {};
+  for (const key of allowed) {
+    if (patch[key] !== undefined) {
+      if (key === 'max_attempts') {
+        const n = Number(patch[key]);
+        if (!Number.isInteger(n) || n < 1 || n > 50) {
+          return res.status(400).json({ error: 'max_attempts must be integer 1–50' });
+        }
+        current[key] = n;
+      } else {
+        current[key] = patch[key];
+      }
+    }
+  }
+  if (current.repo_path) ensureRepoPathExists(current.repo_path);
+  try {
+    atomicWriteJSON(taskPath, current);
+  } catch (err) {
+    return res.status(500).json({ error: `Failed to write task.json: ${err.message}` });
+  }
+  res.json({ ok: true, task_id: taskId });
 });
 
 // ================================================================
@@ -1060,6 +1148,48 @@ app.get('/api/cliapi-providers', (req, res) => {
   }
 });
 
+// Map providerId to gateway-owned_by so we only show that provider's models (8317 returns all channels in one list).
+const PROVIDER_OWNED_BY = {
+  'antigravity-cli': 'antigravity',
+  'codex-cli': 'openai',
+  'claude-cli': 'anthropic'
+};
+
+// Live models from provider gateway (GET /v1/models). Used when provider is selected so dropdown shows actual supported models.
+app.get('/api/cliapi-providers/:providerId/models', async (req, res) => {
+  try {
+    const data = readJSON(CLIAPI_PROVIDERS_PATH);
+    const providers = (data && data.providers) || {};
+    const providerId = req.params.providerId;
+    const p = providers[providerId];
+    if (!p || !p.base_url) {
+      return res.json({ models: [] });
+    }
+    const baseUrl = String(p.base_url).replace(/\/$/, '');
+    const apiKey = process.env.OPENCLAW_API_KEY || 'openclawaousers';
+    const url = `${baseUrl}/models`;
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${apiKey}` }
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      return res.json({ models: [], error: body?.error?.message || response.statusText });
+    }
+    let dataList = Array.isArray(body.data) ? body.data : [];
+    const ownedBy = PROVIDER_OWNED_BY[providerId];
+    if (ownedBy) {
+      dataList = dataList.filter((m) => (m.owned_by || '') === ownedBy);
+    }
+    const models = dataList.map((m) => {
+      const id = m.id || m.model || '';
+      return { id, alias: m.name || m.alias || id };
+    }).filter((m) => m.id);
+    return res.json({ models });
+  } catch (err) {
+    return res.json({ models: [], error: err.message });
+  }
+});
+
 // A6-1: GET/PUT /api/config — default coder/judge from rdloop.config.json (C1-2)
 function readRdloopConfig() {
   try {
@@ -1243,6 +1373,7 @@ app.post('/api/task_specs', requireWritable, (req, res) => {
   }
 
   const data = { ...spec, task_id, created_at: spec.created_at || new Date().toISOString() };
+  if (data.repo_path) ensureRepoPathExists(data.repo_path);
 
   try {
     atomicWriteJSON(filepath, data);
@@ -1280,6 +1411,7 @@ app.put('/api/task_specs/:taskId', requireWritable, (req, res) => {
   }
 
   const data = { ...spec, task_id: taskId };
+  if (data.repo_path) ensureRepoPathExists(data.repo_path);
   try {
     atomicWriteJSON(found.filepath, data);
   } catch (err) {

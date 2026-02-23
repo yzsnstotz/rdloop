@@ -50,10 +50,17 @@ print(json.dumps({'model':'${model}','messages':[{'role':'user','content':inst}]
     echo "195" > "${attempt_dir}/coder/rc.txt"
     exit 195
   fi
-  echo "$resp" | python3 -c "
+  resp_path=$(mktemp)
+  printf '%s' "$resp" > "$resp_path"
+  python3 - "$resp_path" <<'PYEOF'
 import json,sys
+raw=''
 try:
-    d=json.load(sys.stdin)
+    raw=open(sys.argv[1], encoding='utf-8').read()
+except Exception:
+    pass
+try:
+    d=json.loads(raw)
     c=d.get('choices',[{}])[0].get('message',{}).get('content','')
     if c:
         print(c)
@@ -62,9 +69,16 @@ try:
         print(d.get('error',{}).get('message',str(d))[:500])
 except Exception as e:
     print('Parse error:', str(e))
-" 2>/dev/null || echo "$resp"
+PYEOF
+  py_rc=$?
+  rm -f "$resp_path"
+  [ "$py_rc" = "0" ] || echo "$resp"
   echo "[CODER][antigravity] $(date -u +%Y-%m-%dT%H:%M:%SZ) Finished"
 } > "$run_log" 2>&1
+if [ -n "${CODER_STDOUT_PATH:-}" ] && [ "${CODER_STDOUT_PATH}" != "$run_log" ]; then
+  cp "$run_log" "${CODER_STDOUT_PATH}" 2>/dev/null || true
+fi
+[ -n "${CODER_STDERR_PATH:-}" ] && [ ! -f "${CODER_STDERR_PATH}" ] && : > "${CODER_STDERR_PATH}"
 # 0 on success; 195 = auth/API error or API returned error body
 if grep -q "Parse error:\|curl failed\|API_ERROR" "$run_log" 2>/dev/null; then
   echo "195" > "${attempt_dir}/coder/rc.txt"

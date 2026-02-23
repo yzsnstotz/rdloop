@@ -1,0 +1,7 @@
+{
+  "task_type": "engineering_impl",
+  "max_attempts": 5,
+  "repo_path": ".",
+  "instruction": "edited",
+  "task_id": "test_task"
+}

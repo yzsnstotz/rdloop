@@ -14,18 +14,21 @@ async function stubRunningTask(page, taskId = FAKE_TASK_ID) {
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify([{ task_id: taskId, state: 'RUNNING', attempt: 1 }]),
+      body: JSON.stringify({ items: [{ task_id: taskId, state: 'RUNNING', attempt: 1 }], next_cursor: null }),
     });
   });
-  await page.route(`**/api/task/${taskId}/status`, async route => {
+  await page.route(`**/api/task/${taskId}`, async route => {
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({ task_id: taskId, state: 'RUNNING', attempt: 1 }),
+      body: JSON.stringify({
+        task: { task_id: taskId },
+        status: { task_id: taskId, state: 'RUNNING', current_attempt: 1 },
+        final_summary: null,
+        attempts: [],
+        timeline: []
+      }),
     });
-  });
-  await page.route(`**/api/task/${taskId}/attempts`, async route => {
-    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([]) });
   });
   await page.route(`**/api/task/${taskId}/log/**`, async route => {
     const url = route.request().url();
@@ -62,14 +65,14 @@ test.describe('K8-2: GUI tab retention and live log', () => {
     // Default tab should be 'coordinator' (or whatever is persisted)
     const initialTab = await page.evaluate(() => sessionStorage.getItem('rdloop_activeTab'));
     // Click the 'coder' tab
-    await page.locator('button:has-text("Coder"), [data-tab="coder"], text=Coder').first().click();
+    await page.locator('#tab-coder, [data-tab="coder"], button:has-text("Coder")').first().click();
     await page.waitForTimeout(200);
 
     const afterCoderTab = await page.evaluate(() => sessionStorage.getItem('rdloop_activeTab'));
     expect(afterCoderTab).toBe('coder');
 
     // Click the 'judge' tab
-    await page.locator('button:has-text("Judge"), [data-tab="judge"], text=Judge').first().click();
+    await page.locator('#tab-judge, [data-tab="judge"], button:has-text("Judge")').first().click();
     await page.waitForTimeout(200);
 
     const afterJudgeTab = await page.evaluate(() => sessionStorage.getItem('rdloop_activeTab'));

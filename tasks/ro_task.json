@@ -1,0 +1,8 @@
+{
+  "task_type": "engineering_impl",
+  "max_attempts": 3,
+  "repo_path": ".",
+  "instruction": "x",
+  "task_id": "ro_task",
+  "created_at": "2026-02-22T06:13:35.098Z"
+}

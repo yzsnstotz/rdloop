@@ -15,7 +15,7 @@ export GIT_DISCOVERY_ACROSS_FILESYSTEM=1
 # 0. Constants & globals
 ##############################################################################
 RDLOOP_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-OUT_DIR="${RDLOOP_ROOT}/out"
+OUT_DIR="${RDLOOP_OUT_DIR:-${RDLOOP_ROOT}/out}"
 WORKTREES_DIR="${RDLOOP_ROOT}/worktrees"
 LIB_DIR="${RDLOOP_ROOT}/coordinator/lib"
 PROMPTS_DIR="${RDLOOP_ROOT}/prompts"
@@ -261,7 +261,7 @@ write_evidence() {
 import json,sys
 d={"schema_version":"v1","task_id":sys.argv[1],"attempt":int(sys.argv[2]),
    "task_code":sys.argv[11],"worktree_path":sys.argv[3],"created_at":sys.argv[4],
-   "git":{"diff_stat_path":"git/diff.stat","diff_patch_path":"git/diff.patch",
+   "git":{"diff_stat_path":"diff.stat","diff_patch_path":"diff.patch",
           "head_commit":sys.argv[5]},
    "commands":json.loads(sys.argv[6]),
    "test":{"cmd":sys.argv[7],"rc":int(sys.argv[8]),"log_tail":sys.argv[9]},
@@ -681,6 +681,7 @@ process_control() {
       if [ -n "$ea" ] && [ "$ea" != "0" ]; then
         local pad; pad=$(printf "%03d" "$ea")
         mkdir -p "${TASK_DIR}/attempt_${pad}/coder"
+        echo "$et" > "${TASK_DIR}/attempt_${pad}/coder/prompt.txt"
         echo "$et" > "${TASK_DIR}/attempt_${pad}/coder/instruction.txt"
       fi
       rm -f "$cf"; [ -n "$nonce" ] && echo "$nonce" >> "$pf"
@@ -778,6 +779,10 @@ setup_worktree() {
   local att_num="$1" repo="$2" bref="$3"
   local pad; pad=$(printf "%03d" "$att_num")
   local wt="${WORKTREES_DIR}/${TASK_ID}/attempt_${pad}"
+  # Create repo path if it does not exist (so setting repo_path to a new dir does not fail before git init)
+  if [ -n "$repo" ] && [ ! -d "$repo" ]; then
+    mkdir -p "$repo"
+  fi
   # Check repo is git
   if ! git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
     enter_paused "PAUSED_NOT_GIT_REPO" "repo_path '${repo}' is not a git repository" \
@@ -789,21 +794,27 @@ setup_worktree() {
 
   # Try git worktree add first
   local wt_ok=0
-  git -C "$repo" worktree add "$wt" "$bref" 2>/dev/null && wt_ok=1
+  local tout=""
+  command -v timeout >/dev/null 2>&1 && tout="timeout"
+  [ -z "$tout" ] && command -v gtimeout >/dev/null 2>&1 && tout="gtimeout"
+  if [ -n "$tout" ]; then
+    $tout 15 git -C "$repo" worktree add --detach "$wt" "$bref" >/dev/null 2>&1 && wt_ok=1
+  else
+    git -C "$repo" worktree add --detach "$wt" "$bref" >/dev/null 2>&1 && wt_ok=1
+  fi
 
   if [ "$wt_ok" = "0" ]; then
-    # Fallback: copy repo (preserving .git as standalone)
+    # Fallback: export tracked files only (avoid copying heavy runtime dirs like out/)
     mkdir -p "$wt"
-    # Copy non-git content first, then .git
-    cp -R "$repo"/. "$wt"/ 2>/dev/null || true
-    # If .git is a worktree link file (not a dir), fix it
-    if [ -f "${wt}/.git" ]; then
-      rm -f "${wt}/.git"
-      git -C "$wt" init >/dev/null 2>&1 || true
-      git -C "$wt" add -A >/dev/null 2>&1 || true
-      git -C "$wt" commit -m "worktree init" --allow-empty >/dev/null 2>&1 || true
-    fi
-    # If .git dir exists (copied), it's already a valid standalone git repo
+    git -C "$repo" archive "$bref" | tar -x -C "$wt" >/dev/null 2>&1 || {
+      # Last resort: copy repo tree when archive is unavailable.
+      cp -R "$repo"/. "$wt"/ 2>/dev/null || true
+    }
+    # Ensure standalone git repo for downstream git diff/log commands.
+    [ -f "${wt}/.git" ] && rm -f "${wt}/.git"
+    git -C "$wt" init >/dev/null 2>&1 || true
+    git -C "$wt" add -A >/dev/null 2>&1 || true
+    git -C "$wt" commit -m "worktree init" --allow-empty >/dev/null 2>&1 || true
   fi
   echo "$wt"
 }
@@ -830,7 +841,8 @@ copy_artifacts() {
 ##############################################################################
 build_instruction() {
   local att_dir="$1" att_num="$2" wt="$3" bref="$4" goal="$5" acceptance="$6"
-  local ifile="${att_dir}/coder/instruction.txt"
+  local ifile="${att_dir}/coder/prompt.txt"
+  local legacy_ifile="${att_dir}/coder/instruction.txt"
   local task_type; task_type=$(json_read "$TASK_JSON" "task_type" "")
   local is_eng_impl=""
   [ "$task_type" = "engineering_impl" ] || [ "$task_type" = "engineering_implementation" ] && is_eng_impl="1"
@@ -878,6 +890,7 @@ build_instruction() {
   } > "$ifile"
   # E5-2: Consume user_input.jsonl (incremental), append USER_INPUT block, set LAST_USER_INPUT_TS_CONSUMED
   consume_user_input "$ifile"
+  cp "$ifile" "$legacy_ifile" 2>/dev/null || true
   echo "$ifile"
 }
 
@@ -970,7 +983,7 @@ run_attempt() {
   export JUDGE_MODEL="$judge_model"
   # Map display names to script suffix (call_coder_${suffix}.sh / call_judge_${suffix}.sh)
   case "$coder_type" in cursor-agent|cursor_cli) coder_script_suffix="cursor";; codex-cli|codex_cli) coder_script_suffix="codex";; claude-bridge|claude_bridge) coder_script_suffix="claude_bridge";; antigravity-cli) coder_script_suffix="antigravity";; *) coder_script_suffix="$coder_type";; esac
-  case "$judge_type" in cursor-agent|cursor_cli) judge_script_suffix="cursor";; codex-cli|codex_cli) judge_script_suffix="codex";; antigravity-cli) judge_script_suffix="antigravity";; *) judge_script_suffix="$judge_type";; esac
+  case "$judge_type" in cursor-agent|cursor_cli) judge_script_suffix="cursor";; codex-cli|codex_cli) judge_script_suffix="codex";; claude-cli|claude_bridge) judge_script_suffix="claude";; antigravity-cli) judge_script_suffix="antigravity";; *) judge_script_suffix="$judge_type";; esac
   coder_timeout=$(json_read "$TASK_JSON" "coder_timeout_seconds" "600")
   test_timeout=$(json_read "$TASK_JSON" "test_timeout_seconds" "300")
   judge_timeout=$(json_read "$TASK_JSON" "judge_timeout_seconds" "300")
@@ -979,7 +992,13 @@ run_attempt() {
   local is_eng_impl=""
   [ "$task_type" = "engineering_impl" ] || [ "$task_type" = "engineering_implementation" ] && is_eng_impl="1"
 
-  mkdir -p "${att_dir}/coder" "${att_dir}/test" "${att_dir}/git" "${att_dir}/judge"
+  mkdir -p "${att_dir}/coder" "${att_dir}/test" "${att_dir}/judge"
+  : > "${att_dir}/coder/prompt.txt"
+  : > "${att_dir}/coder/stdout.log"
+  : > "${att_dir}/coder/stderr.log"
+  : > "${att_dir}/judge/prompt.txt"
+  : > "${att_dir}/judge/stdout.log"
+  : > "${att_dir}/judge/stderr.log"
 
   local att_start; att_start=$(now_iso)
   write_status "RUNNING" "$att_num" "$max_att" "false" "" "" '[]' "" "" "null" "${LAST_USER_INPUT_TS_CONSUMED:-}"
@@ -999,6 +1018,10 @@ run_attempt() {
 
   # Cursor uses cliapi (cursorcliapi 8000), same as other adapters; no queue CLI required
   local ifile; ifile=$(build_instruction "$att_dir" "$att_num" "$wt" "$base_ref" "$goal" "$acceptance")
+  export CODER_PROMPT_PATH="${att_dir}/coder/prompt.txt"
+  export CODER_STDOUT_PATH="${att_dir}/coder/stdout.log"
+  export CODER_STDERR_PATH="${att_dir}/coder/stderr.log"
+  export CODER_RC_PATH="${att_dir}/coder/rc.txt"
   local coder_script="${LIB_DIR}/call_coder_${coder_script_suffix}.sh"
   if [ ! -f "$coder_script" ]; then
     log_error "Coder script not found: ${coder_script}"
@@ -1021,6 +1044,10 @@ run_attempt() {
       [ -f "${att_dir}/coder/rc.txt" ] && coder_rc=$(cat "${att_dir}/coder/rc.txt" 2>/dev/null || echo "$coder_rc")
     fi
     [ ! -f "${att_dir}/coder/rc.txt" ] && echo "$coder_rc" > "${att_dir}/coder/rc.txt"
+    if [ ! -s "${att_dir}/coder/stdout.log" ] && [ -f "${att_dir}/coder/run.log" ]; then
+      cp "${att_dir}/coder/run.log" "${att_dir}/coder/stdout.log" 2>/dev/null || true
+    fi
+    [ -f "${att_dir}/coder/stderr.log" ] || : > "${att_dir}/coder/stderr.log"
     write_commands_log "$att_num" "coder:${coder_type}" "$coder_rc" "$c_secs" "$cmd_log"
   fi
   c_fin=$(now_iso)
@@ -1054,6 +1081,7 @@ run_attempt() {
 
   # Skip test and judge when run.log has no substantial coder output (do this before test so we never run test then pause without judge)
   local coder_log="${att_dir}/coder/run.log"
+  [ ! -f "$coder_log" ] && coder_log="${att_dir}/coder/stdout.log"
   local coder_log_size=0
   [ -f "$coder_log" ] && coder_log_size=$(wc -c < "$coder_log" 2>/dev/null || echo "0")
   if [ "$coder_log_size" -lt 600 ] 2>/dev/null; then
@@ -1116,10 +1144,10 @@ run_attempt() {
   check_control_pause "AFTER_TEST"
 
   # ---- GIT EVIDENCE ----
-  git -C "$wt" diff "${base_ref}...HEAD" > "${att_dir}/git/diff.patch" 2>/dev/null || echo "" > "${att_dir}/git/diff.patch"
-  git -C "$wt" diff --stat "${base_ref}...HEAD" > "${att_dir}/git/diff.stat" 2>/dev/null || echo "" > "${att_dir}/git/diff.stat"
-  git -C "$wt" rev-parse HEAD > "${att_dir}/git/head_commit.txt" 2>/dev/null || echo "" > "${att_dir}/git/head_commit.txt"
-  local hc; hc=$(cat "${att_dir}/git/head_commit.txt" 2>/dev/null || echo "")
+  git -C "$wt" diff "${base_ref}...HEAD" > "${att_dir}/diff.patch" 2>/dev/null || echo "" > "${att_dir}/diff.patch"
+  git -C "$wt" diff --stat "${base_ref}...HEAD" > "${att_dir}/diff.stat" 2>/dev/null || echo "" > "${att_dir}/diff.stat"
+  git -C "$wt" rev-parse HEAD > "${att_dir}/head_commit.txt" 2>/dev/null || echo "" > "${att_dir}/head_commit.txt"
+  local hc; hc=$(cat "${att_dir}/head_commit.txt" 2>/dev/null || echo "")
 
   # Guardrails
   check_guardrails "$wt" "$base_ref"
@@ -1143,7 +1171,7 @@ print(json.dumps(cs))
 " "$cmd_log" 2>/dev/null || echo "[]")
   fi
 
-  write_evidence "$att_dir" "$att_num" "$wt" "$hc" "$test_cmd" "$test_rc" "$tlog_tail" "$cmds_json" "${att_dir}/coder/run.log" "$task_code"
+  write_evidence "$att_dir" "$att_num" "$wt" "$hc" "$test_cmd" "$test_rc" "$tlog_tail" "$cmds_json" "${att_dir}/coder/stdout.log" "$task_code"
   write_event "$att_num" "EVIDENCE_PACKED" "evidence.json written" "$att_dir" "$wt"
 
   check_control_pause "BEFORE_JUDGE"
@@ -1178,6 +1206,12 @@ print(json.dumps(cs))
   if [ -n "$task_type_tt" ] && [ -f "${PROMPTS_DIR}/judge.prompt.${task_type_tt}.md" ]; then
     jprompt="${PROMPTS_DIR}/judge.prompt.${task_type_tt}.md"
   fi
+  cp "$jprompt" "${att_dir}/judge/prompt.txt" 2>/dev/null || : > "${att_dir}/judge/prompt.txt"
+  export JUDGE_PROMPT_PATH="${att_dir}/judge/prompt.txt"
+  export JUDGE_STDOUT_PATH="${att_dir}/judge/stdout.log"
+  export JUDGE_STDERR_PATH="${att_dir}/judge/stderr.log"
+  export JUDGE_RC_PATH="${att_dir}/judge/rc.txt"
+  export JUDGE_VERDICT_PATH="${att_dir}/judge/verdict.json"
   local jvalid=0
 
   # B4-7: run.log records Judge temperature=0 (deterministic output)
@@ -1197,9 +1231,14 @@ print(json.dumps(cs))
       judge_rc=$?
     fi
     set -e
+    [ ! -f "${att_dir}/judge/rc.txt" ] && echo "$judge_rc" > "${att_dir}/judge/rc.txt"
     local j_e_e; j_e_e=$(date +%s)
     local j_secs=$(( j_e_e - j_s_e ))
     write_commands_log "$att_num" "judge:${judge_type}" "$judge_rc" "$j_secs" "$cmd_log"
+    if [ ! -s "${att_dir}/judge/stdout.log" ] && [ -f "${att_dir}/judge/run.log" ]; then
+      cp "${att_dir}/judge/run.log" "${att_dir}/judge/stdout.log" 2>/dev/null || true
+    fi
+    [ -f "${att_dir}/judge/stderr.log" ] || : > "${att_dir}/judge/stderr.log"
 
     if [ "$judge_rc" = "0" ] && [ -f "${att_dir}/judge/verdict.json" ]; then
       set +e
@@ -1389,8 +1428,13 @@ cmd_rerun_attempt() {
   local np; np=$(printf "%03d" "$nxt")
   local nad="${TASK_DIR}/attempt_${np}"
   mkdir -p "${nad}/coder"
-  [ -f "${TASK_DIR}/attempt_${fp}/coder/instruction.txt" ] && \
+  if [ -f "${TASK_DIR}/attempt_${fp}/coder/prompt.txt" ]; then
+    cp "${TASK_DIR}/attempt_${fp}/coder/prompt.txt" "${nad}/coder/prompt.txt"
+    cp "${TASK_DIR}/attempt_${fp}/coder/prompt.txt" "${nad}/coder/instruction.txt" 2>/dev/null || true
+  elif [ -f "${TASK_DIR}/attempt_${fp}/coder/instruction.txt" ]; then
     cp "${TASK_DIR}/attempt_${fp}/coder/instruction.txt" "${nad}/coder/instruction.txt"
+    cp "${TASK_DIR}/attempt_${fp}/coder/instruction.txt" "${nad}/coder/prompt.txt" 2>/dev/null || true
+  fi
   write_event "$nxt" "ATTEMPT_STARTED" "RERUN_FROM=attempt_${fp}" "$nad"
   if ! acquire_lock; then ensure_status_on_lock_fail; NORMAL_EXIT=1; exit 0; fi
   run_attempt "$nxt"
@@ -1519,6 +1563,11 @@ cmd_continue() {
   if [ -f "${TASK_DIR}/status.json" ]; then
     local prev_lt_count; prev_lt_count=$(json_read "${TASK_DIR}/status.json" "last_transition.consecutive_count" "0")
     local prev_lt_key; prev_lt_key=$(json_read "${TASK_DIR}/status.json" "last_transition.reason_key" "")
+    case "$prev_lt_key" in
+      PAUSED_JUDGE_TIMEOUT) prev_lt_key="judge_timeout" ;;
+      PAUSED_CODER_TIMEOUT) prev_lt_key="coder_timeout" ;;
+      PAUSED_TEST_TIMEOUT) prev_lt_key="test_timeout" ;;
+    esac
     [ -n "$prev_lt_count" ] && [ "$prev_lt_count" != "0" ] && {
       CONSECUTIVE_TIMEOUT_COUNT="$prev_lt_count"
       CONSECUTIVE_TIMEOUT_KEY="$prev_lt_key"
