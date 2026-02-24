@@ -838,18 +838,35 @@ copy_artifacts() {
 
 ##############################################################################
 # 9. Build coder instruction with context — §5.4
+# attempt_context_mode: fresh_each = each attempt from scratch (divergent);
+#   iterative = n+1 gets previous coder output as context (convergent).
 ##############################################################################
 build_instruction() {
   local att_dir="$1" att_num="$2" wt="$3" bref="$4" goal="$5" acceptance="$6"
   local ifile="${att_dir}/coder/prompt.txt"
   local legacy_ifile="${att_dir}/coder/instruction.txt"
   local task_type; task_type=$(json_read "$TASK_JSON" "task_type" "")
+  local attempt_context_mode; attempt_context_mode=$(json_read "$TASK_JSON" "attempt_context_mode" "fresh_each")
   local is_eng_impl=""
   [ "$task_type" = "engineering_impl" ] || [ "$task_type" = "engineering_implementation" ] && is_eng_impl="1"
   mkdir -p "${att_dir}/coder"
   {
     echo "=== CONTEXT ==="
     echo ""
+    # Iterative mode: include previous attempt's coder output so coder can refine on it
+    if [ "$att_num" -gt 1 ] && [ "$attempt_context_mode" = "iterative" ]; then
+      local pp; pp=$(printf "%03d" $(( att_num - 1 )))
+      local prev_run_log="${TASK_DIR}/attempt_${pp}/coder/run.log"
+      if [ -f "$prev_run_log" ]; then
+        echo "=== PREVIOUS CODER OUTPUT (attempt $(( att_num - 1 ))) ==="
+        echo "(Use this as the basis to modify or improve; do not start from zero.)"
+        echo ""
+        # Limit size to avoid token overflow (tail ~80k chars; adapter logs at start are small)
+        tail -c 80000 "$prev_run_log" 2>/dev/null | head -c 80000
+        echo ""
+        echo ""
+      fi
+    fi
     if [ "$att_num" -gt 1 ]; then
       local pp; pp=$(printf "%03d" $(( att_num - 1 )))
       local pv="${TASK_DIR}/attempt_${pp}/judge/verdict.json"
@@ -1306,6 +1323,12 @@ print(json.dumps(cs))
 
   # 2. Read decision and detect B4 mode
   local decision; decision=$(json_read "${att_dir}/judge/verdict.json" "decision" "FAIL")
+  decision=$(echo "$decision" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  case "$decision" in
+    PASS|FAIL|NEED_USER_INPUT) ;;
+    *) log_info "Verdict decision '${decision}' not in PASS/FAIL/NEED_USER_INPUT; normalizing to FAIL"
+       decision="FAIL" ;;
+  esac
   local verdict_gated="false"
   local thresholds_pass="true"
   local final_score_for_summary=""

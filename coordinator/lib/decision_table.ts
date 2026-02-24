@@ -38,7 +38,17 @@ export interface DecisionResult {
   message: string;
 }
 
+const VALID_VERDICT_DECISIONS = ["PASS", "FAIL", "NEED_USER_INPUT"] as const;
+
 export function decideNextState(ctx: DecisionContext): DecisionResult {
+  // Normalize verdict_decision so we never hit the fallback for empty/invalid values
+  const vd = (ctx.verdict_decision ?? "").trim();
+  if (VALID_VERDICT_DECISIONS.indexOf(vd as (typeof VALID_VERDICT_DECISIONS)[number]) === -1) {
+    ctx.verdict_decision = "FAIL";
+  } else {
+    ctx.verdict_decision = vd;
+  }
+
   // 1. CRASH
   if (ctx.error_class === "CRASH") {
     return {

@@ -626,7 +626,7 @@ app.put('/api/task/:taskId/task_json', requireWritable, validateTaskId, (req, re
   if (!current) {
     return res.status(500).json({ error: 'Failed to read task.json' });
   }
-  const allowed = ['goal', 'acceptance', 'repo_path', 'base_ref', 'max_attempts', 'test_cmd', 'coder', 'judge', 'coder_model', 'judge_model'];
+  const allowed = ['goal', 'acceptance', 'repo_path', 'base_ref', 'max_attempts', 'test_cmd', 'coder', 'judge', 'coder_model', 'judge_model', 'attempt_context_mode'];
   const patch = req.body && typeof req.body === 'object' ? req.body : {};
   for (const key of allowed) {
     if (patch[key] !== undefined) {
@@ -636,6 +636,11 @@ app.put('/api/task/:taskId/task_json', requireWritable, validateTaskId, (req, re
           return res.status(400).json({ error: 'max_attempts must be integer 1–50' });
         }
         current[key] = n;
+      } else if (key === 'attempt_context_mode') {
+        if (!['fresh_each', 'iterative'].includes(patch[key])) {
+          return res.status(400).json({ error: 'attempt_context_mode must be fresh_each or iterative' });
+        }
+        current[key] = patch[key];
       } else {
         current[key] = patch[key];
       }
@@ -1276,6 +1281,9 @@ function validateTaskSpecData(spec) {
   }
   if (spec.scoring_mode && !['rubric_analytic', 'holistic_impression', ''].includes(spec.scoring_mode)) {
     errors.push('scoring_mode: invalid enum value');
+  }
+  if (spec.attempt_context_mode !== undefined && !['fresh_each', 'iterative'].includes(spec.attempt_context_mode)) {
+    errors.push('attempt_context_mode: must be fresh_each or iterative');
   }
   return { valid: errors.length === 0, errors };
 }

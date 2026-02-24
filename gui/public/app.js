@@ -1134,6 +1134,14 @@ async function openNewSpecModal() {
           </select>
         </div>
 
+        <div style="margin-bottom:12px">
+          <label class="form-label">Attempt context mode</label>
+          <select id="modal-attempt-context-mode" class="form-select" title="fresh_each: each attempt from scratch (divergent). iterative: n+1 gets previous coder output as context (convergent).">
+            <option value="fresh_each">fresh_each — each attempt from scratch (divergent, e.g. scripts)</option>
+            <option value="iterative">iterative — next attempt builds on previous coder output (convergent, e.g. requirements, code)</option>
+          </select>
+        </div>
+
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
           <div>
             <label class="form-label">Coder Adapter (A5)</label>
@@ -1206,6 +1214,8 @@ function applyTemplate() {
   // Update task-type selector
   const typeEl = document.getElementById('modal-task-type');
   if (typeEl && tpl.task_type) typeEl.value = tpl.task_type;
+  const attemptModeEl = document.getElementById('modal-attempt-context-mode');
+  if (attemptModeEl && (tpl.attempt_context_mode === 'iterative' || tpl.attempt_context_mode === 'fresh_each')) attemptModeEl.value = tpl.attempt_context_mode;
   // Update adapter and model selectors
   const coderEl = document.getElementById('adapter-coder');
   if (coderEl && tpl.coder) coderEl.value = tpl.coder;
@@ -1274,6 +1284,7 @@ async function saveNewSpec() {
       acceptance: '',
       test_cmd: 'true',
       max_attempts: 3,
+      attempt_context_mode: document.getElementById('modal-attempt-context-mode')?.value || 'fresh_each',
       constraints: [],
       allowed_paths: [],
       forbidden_globs: ['**/.env', '**/secrets*', '**/*.pem'],
@@ -1302,6 +1313,8 @@ async function saveNewSpec() {
   if (judgeModelVal) spec.judge_model = judgeModelVal; else if (spec.judge_model !== undefined) delete spec.judge_model;
   const taskTypeVal = document.getElementById('modal-task-type')?.value;
   if (taskTypeVal) spec.task_type = taskTypeVal;
+  const attemptContextModeVal = document.getElementById('modal-attempt-context-mode')?.value;
+  if (attemptContextModeVal) spec.attempt_context_mode = attemptContextModeVal;
   // Repo & Git from form
   const rp = document.getElementById('modal-repo-path')?.value?.trim();
   if (rp !== undefined && rp !== '') spec.repo_path = rp;
@@ -1370,6 +1383,14 @@ async function openEditSpecModal(taskId) {
             <option value="douyin_script" ${spec.task_type === 'douyin_script' ? 'selected' : ''}>douyin_script</option>
             <option value="storyboard" ${spec.task_type === 'storyboard' ? 'selected' : ''}>storyboard</option>
             <option value="paid_mini_drama" ${spec.task_type === 'paid_mini_drama' ? 'selected' : ''}>paid_mini_drama</option>
+          </select>
+        </div>
+
+        <div style="margin-bottom:12px">
+          <label class="form-label">Attempt context mode</label>
+          <select id="modal-attempt-context-mode" class="form-select" title="fresh_each: each attempt from scratch. iterative: n+1 gets previous coder output as context.">
+            <option value="fresh_each" ${(spec.attempt_context_mode || 'fresh_each') === 'fresh_each' ? 'selected' : ''}>fresh_each — each attempt from scratch (divergent, e.g. scripts)</option>
+            <option value="iterative" ${(spec.attempt_context_mode || '') === 'iterative' ? 'selected' : ''}>iterative — next attempt builds on previous coder output (convergent, e.g. requirements, code)</option>
           </select>
         </div>
 
@@ -1458,6 +1479,8 @@ async function saveEditSpec(taskId) {
   if (judgeModelVal) spec.judge_model = judgeModelVal; else if (spec.judge_model !== undefined) delete spec.judge_model;
   const taskTypeVal = document.getElementById('modal-task-type')?.value;
   if (taskTypeVal) spec.task_type = taskTypeVal;
+  const attemptContextModeVal = document.getElementById('modal-attempt-context-mode')?.value;
+  if (attemptContextModeVal) spec.attempt_context_mode = attemptContextModeVal;
   spec.task_id = taskId;
 
   // Repo & Git from form

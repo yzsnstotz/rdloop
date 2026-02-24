@@ -22,7 +22,11 @@ function main(): void {
 
   // Apply defaults for optional fields
   ctx.error_class = ctx.error_class ?? "";
-  ctx.verdict_decision = ctx.verdict_decision ?? "";
+  let vd = (ctx.verdict_decision ?? "").trim();
+  if (vd !== "PASS" && vd !== "FAIL" && vd !== "NEED_USER_INPUT") {
+    vd = "FAIL";
+  }
+  ctx.verdict_decision = vd;
   ctx.verdict_gated = ctx.verdict_gated ?? false;
   ctx.thresholds_pass = ctx.thresholds_pass ?? true;
   ctx.consecutive_timeout_count = ctx.consecutive_timeout_count ?? 0;

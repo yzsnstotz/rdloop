@@ -39,6 +39,7 @@
     "structure_and_readability": 3,
     "min_score": 50
   },
-  "coder_model": "gemini-2.5-flash",
-  "judge_model": "gemini-2.5-flash"
+  "coder_model": "gemini-3.1-pro-high",
+  "judge_model": "gemini-3.1-pro-high",
+  "attempt_context_mode": "iterative"
 }
